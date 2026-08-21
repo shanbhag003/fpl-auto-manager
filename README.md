@@ -30,6 +30,18 @@ When it does act:
 
 ---
 
+## Architecture
+
+![FPL Intelligence Engine architecture](docs/architecture.png)
+
+Seven decision modules, run in sequence every two hours: player scoring, a
+minutes model, Claude-powered team news (shadow mode, can only ever lower a
+score), transfer planning, squad optimisation, XI & captain selection, and a
+final explainability pass that writes the plain-English reasoning from the six
+modules before it.
+
+---
+
 ## The interesting parts
 
 **Two scores, not one.** Who you *own* is a five-gameweek question, because
