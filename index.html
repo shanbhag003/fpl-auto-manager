@@ -184,6 +184,30 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .bench .pcard{width:100px;opacity:.72}
 .bench .pcard.used{opacity:1}
 
+/* how-to-read panel */
+.guide{border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.028);
+  margin-bottom:26px;overflow:hidden}
+.guide summary{list-style:none;cursor:pointer;padding:14px 16px;display:flex;
+  align-items:center;gap:10px;font-family:var(--mono);font-size:10px;font-weight:600;
+  letter-spacing:.15em;text-transform:uppercase;color:var(--lavd);
+  transition:color .15s}
+.guide summary::-webkit-details-marker{display:none}
+.guide summary:hover{color:var(--lav)}
+.guide summary .chev{margin-left:auto;transition:transform .2s;font-size:13px}
+.guide[open] summary .chev{transform:rotate(180deg)}
+.guide[open] summary{color:var(--mint);border-bottom:1px solid var(--line)}
+.gbody{padding:20px 16px 18px;display:flex;gap:26px;align-items:flex-start}
+.gdemo{display:flex;gap:10px;flex:0 0 auto}
+.gdemo .pcard{width:118px}
+.gintro{font-size:13.5px;color:var(--lav);line-height:1.6;margin-bottom:16px;max-width:66ch}
+.gintro b{color:var(--white);font-weight:600}
+.gkey{display:grid;gap:11px;min-width:0}
+.gkey div{display:grid;grid-template-columns:auto 1fr;gap:11px;align-items:baseline;
+  font-size:13px;color:var(--lav);line-height:1.5}
+.gkey .t{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--white);
+  white-space:nowrap;padding-top:1px}
+.gkey .sw{display:inline-block;width:26px;height:4px;border-radius:2px;vertical-align:middle}
+
 /* sections */
 .sec{margin-bottom:34px}
 .sec > .eyebrow{display:block;margin-bottom:12px}
@@ -254,6 +278,10 @@ svg{display:block;width:100%;height:auto;overflow:visible}
   .clock{width:100%;padding:10px 12px}
   .ct{font-size:10.5px;gap:7px}
   .ct .k{min-width:0;flex:0 0 100%;margin-bottom:1px}
+  .gbody{flex-direction:column;gap:18px;padding:16px 14px}
+  .gdemo{align-self:center}
+  .gkey div{grid-template-columns:1fr;gap:2px}
+  .gkey .t{padding-top:0}
   .verdict{grid-template-columns:1fr;gap:1px}
   .vcell{display:flex;align-items:baseline;justify-content:space-between;padding:14px 15px}
   .vcell .lbl{margin-bottom:0}
@@ -448,6 +476,7 @@ function render(g){
   v.appendChild(head);
 
   v.appendChild(verdict(g,scored));
+  v.appendChild(guide(g,scored));
   v.appendChild(pitch(g,scored));
   v.appendChild(bench(g,scored));
   v.appendChild(transfers(g));
@@ -530,6 +559,69 @@ function clock(g){
   }
   wrap.appendChild(line2);
   return wrap;
+}
+
+/* ---------- an explainer built from the real components ------------------ */
+let GUIDE_SEEN = false;
+try { GUIDE_SEEN = localStorage.getItem('fpl-guide') === 'seen'; } catch(e) {}
+
+function guide(g, scored){
+  const d = document.createElement('details');
+  d.className = 'guide';
+  if(!GUIDE_SEEN) d.open = true;
+  d.addEventListener('toggle', () => {
+    if(!d.open){ try { localStorage.setItem('fpl-guide','seen'); } catch(e){} }
+  });
+
+  const sum = el('summary');
+  sum.innerHTML = 'How to read this <span class="chev">⌄</span>';
+  d.appendChild(sum);
+
+  const body = el('div','gbody');
+
+  // Two real cards, rendered by the same function as the squad above, so the
+  // key can never drift out of step with what's actually on the pitch.
+  const fake = {bot:{captain:-99, vice:-98}};
+  const played = {id:-1,name:'Player',pos:'MID',team:'CLUB',cost:0,role:'xi',
+    bench_order:null,multiplier:1,projected_now:4.6,projected_run:null,
+    actual:8,minutes:90,pending:false,note:null};
+  const topl = Object.assign({}, played,
+    {id:-2,actual:null,minutes:null,pending:true});
+  const demo = el('div','gdemo');
+  demo.appendChild(card(played, fake, true, 10));
+  demo.appendChild(card(topl, fake, true, 10));
+  body.appendChild(demo);
+
+  const right = el('div');
+  right.innerHTML = `
+    <p class="gintro">A program picks this team. Every Friday it rates all ~570
+      Premier League players, buys and sells, chooses a captain, and submits the
+      lineup — no human involved. <b>The number it expects each player to score is
+      published before kickoff</b>, so the guesses can be marked against what
+      actually happened.</p>
+    <div class="gkey">
+      <div><span class="t">4.6 → 8</span>
+        <span>Predicted, then actual. The model said this player was worth about
+          4.6 points; he returned 8.</span></div>
+      <div><span class="t">Bar length</span>
+        <span>Points scored. The scale is shared across the whole squad, so a bar
+          twice as long really is twice the points.</span></div>
+      <div><span class="t">The tick</span>
+        <span>Where the prediction sat. Bar past the tick means the model
+          under-rated him; short of it means it over-rated him.</span></div>
+      <div><span class="t"><span class="sw" style="background:var(--mint)"></span>
+        <span class="sw" style="background:var(--rose)"></span></span>
+        <span>Green beat the prediction, red fell short.</span></div>
+      <div><span class="t">Dashed · To play</span>
+        <span>That club hasn't kicked off yet, so there is no score — which is not
+          the same as scoring nothing.</span></div>
+      <div><span class="t">CAPT · VICE</span>
+        <span>The captain's points count double. The vice-captain takes over if the
+          captain doesn't play.</span></div>
+    </div>`;
+  body.appendChild(right);
+  d.appendChild(body);
+  return d;
 }
 
 function pill(text,cls){ return el('span','flag'+(cls?' '+cls:''), esc(text)); }
