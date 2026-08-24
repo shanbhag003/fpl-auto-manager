@@ -562,16 +562,9 @@ function clock(g){
 }
 
 /* ---------- an explainer built from the real components ------------------ */
-let GUIDE_SEEN = false;
-try { GUIDE_SEEN = localStorage.getItem('fpl-guide') === 'seen'; } catch(e) {}
-
 function guide(g, scored){
   const d = document.createElement('details');
-  d.className = 'guide';
-  if(!GUIDE_SEEN) d.open = true;
-  d.addEventListener('toggle', () => {
-    if(!d.open){ try { localStorage.setItem('fpl-guide','seen'); } catch(e){} }
-  });
+  d.className = 'guide';          // closed by default; opened on demand
 
   const sum = el('summary');
   sum.innerHTML = 'How to read this <span class="chev">⌄</span>';
