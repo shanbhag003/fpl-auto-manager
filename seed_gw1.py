@@ -75,12 +75,25 @@ def norm(s):
     return ''.join(c for c in s if not unicodedata.combining(c)).lower().strip()
 
 
-def get(url):
-    r = requests.get(url, headers=HEADERS, timeout=25)
-    if r.status_code == 404:
-        return None
-    r.raise_for_status()
-    return r.json()
+def get(url, tries=5):
+    """GET with backoff. Cloudflare sometimes blocks datacentre IPs on the
+    first attempt, which is what running this from CI or Lambda looks like."""
+    import time
+    last = None
+    for i in range(tries):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=25)
+            if r.status_code == 404:
+                return None
+            if r.status_code == 200 and 'json' in r.headers.get('Content-Type', '').lower():
+                return r.json()
+            last = f"HTTP {r.status_code} ({r.headers.get('Content-Type','?')})"
+        except requests.RequestException as e:
+            last = f"{type(e).__name__}: {e}"
+        print(f"  retry {i+1}/{tries} on {url.rsplit('/api/',1)[-1]}: {last}")
+        time.sleep(2 ** i)
+    raise SystemExit(f"FPL unreachable: {url} — {last}. "
+                     "Usually Cloudflare blocking the runner; re-run the job.")
 
 
 def resolve(elements, teams, name, club):
@@ -109,6 +122,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--push', action='store_true',
                     help='commit to GitHub instead of writing ./data')
+    ap.add_argument('--yes', action='store_true',
+                    help='never prompt; continue past a poster/FPL squad mismatch')
     args = ap.parse_args()
 
     print("Reading FPL...")
@@ -159,8 +174,12 @@ def main():
         print("   only on poster:", sorted(got - submitted))
         print("   only on FPL   :", sorted(submitted - got))
         print("   Fix the tables above before committing.")
-        if input("   Continue anyway? [y/N] ").strip().lower() != 'y':
-            sys.exit(1)
+        if not args.yes and sys.stdin.isatty():
+            if input("   Continue anyway? [y/N] ").strip().lower() != 'y':
+                sys.exit(1)
+        elif not args.yes:
+            sys.exit("   Refusing to continue non-interactively. Re-run with --yes "
+                     "once you've checked the difference above.")
 
     cap = resolve(elements, teams, CAPTAIN_NAME, None)
     vice = resolve(elements, teams, VICE_NAME, None)
@@ -337,6 +356,17 @@ def push(path, obj, message):
     if r.status_code not in (200, 201):
         raise SystemExit(f"push {path} -> HTTP {r.status_code}: {r.text[:300]}")
     print(f"  pushed {path}")
+
+
+def lambda_handler(event, context):
+    """Fallback route: run this from a throwaway Lambda instead of CI.
+
+    Needs GITHUB_REPO and GITHUB_TOKEN in the environment and the requests
+    layer attached. Always pushes; never prompts.
+    """
+    sys.argv = ['seed_gw1.py', '--push', '--yes']
+    main()
+    return {'statusCode': 200, 'body': 'GW1 seeded'}
 
 
 if __name__ == '__main__':
