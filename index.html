@@ -375,18 +375,20 @@ function select(gw){
 /* ---------- gameweek view ---------- */
 function render(g){
   const v=$('#view'); v.innerHTML='';
-  const final = g.status==='final' && g.bot?.actual?.total!=null;
+  const scored = g.bot?.actual?.total!=null;      // points are in, maybe provisional
+  const final  = g.status==='final';               // FPL has finished checking them
 
   // head
   const head=el('div','head');
   head.innerHTML=`<div class="eyebrow">Picked by the bot</div>
     <h2>Gameweek ${g.gw}</h2>
-    <p>${final
-      ? 'Every projection below was committed before kickoff. The actual is what happened.'
-      : 'Every number is the bot&rsquo;s projection for this gameweek. Actuals appear once the gameweek is scored.'}</p>`;
+    <p>${scored
+      ? 'Every projection below was committed before kickoff. The number beside it is what happened.'
+      : 'Every number is the bot&rsquo;s projection for this gameweek. Results appear once the matches are played.'}</p>`;
   const flags=el('div','flags');
   flags.append(
-    pill(final?'Final':'Awaiting results', final?'ok':'live'),
+    pill(final?'Final':scored?'Provisional — bonus not confirmed':'Awaiting results',
+         final?'ok':'live'),
     pill(g.mode==='automated'?'Submitted automatically':g.mode==='advisory'?'Advisory — applied by hand':'Mode unknown'),
     pill(money(g.bot?.value||0)+' squad'),
     pill(g.bot?.formation||''),
@@ -395,9 +397,9 @@ function render(g){
   head.appendChild(flags);
   v.appendChild(head);
 
-  v.appendChild(verdict(g,final));
-  v.appendChild(pitch(g,final));
-  v.appendChild(bench(g,final));
+  v.appendChild(verdict(g,scored));
+  v.appendChild(pitch(g,scored));
+  v.appendChild(bench(g,scored));
   v.appendChild(transfers(g));
   if(g.news?.length) v.appendChild(news(g));
   v.appendChild(chart());
@@ -406,14 +408,14 @@ function render(g){
 
 function pill(text,cls){ return el('span','flag'+(cls?' '+cls:''), esc(text)); }
 
-function verdict(g,final){
+function verdict(g,scored){
   const w=el('div','verdict');
   const bp=g.bot?.actual?.total, hp=g.human?.actual?.total;
   const pj=g.bot?.projected?.total, hpj=g.human?.projected?.total;
 
-  w.appendChild(cell('bot', g.instrumented&&!final?'Bot — projected':'Bot',
-    final?bp:n1(pj),
-    final&&pj!=null ? diff(bp-pj,'vs '+n1(pj)+' projected') : (g.instrumented?'projection':'—')));
+  w.appendChild(cell('bot', g.instrumented&&!scored?'Bot — projected':'Bot',
+    scored?bp:n1(pj),
+    scored&&pj!=null ? diff(bp-pj,'vs '+n1(pj)+' projected') : (g.instrumented?'projection':'—')));
 
   w.appendChild(cell('human','Hand-picked',
     hp!=null?hp:'–',
@@ -440,31 +442,31 @@ function diff(d,label){
   return s;
 }
 
-function pitch(g,final){
+function pitch(g,scored){
   const wrap=el('div','pitch');
   const xi=(g.bot?.squad||[]).filter(p=>p.role==='xi');
   [['GK'],['DEF'],['MID'],['FWD']].forEach(([pos])=>{
     const row=el('div','row');
     xi.filter(p=>p.pos===pos)
       .sort((a,b)=>(b.projected_now??0)-(a.projected_now??0))
-      .forEach(p=>row.appendChild(card(p,g,final)));
+      .forEach(p=>row.appendChild(card(p,g,scored)));
     if(row.children.length) wrap.appendChild(row);
   });
   return wrap;
 }
 
-function bench(g,final){
+function bench(g,scored){
   const w=el('div','benchwrap');
   w.appendChild(el('div','eyebrow dim','Bench, in order'));
   const b=el('div','bench');
   (g.bot?.squad||[]).filter(p=>p.role==='bench')
     .sort((a,b)=>(a.bench_order??9)-(b.bench_order??9))
-    .forEach(p=>{ const c=card(p,g,final); if(p.multiplier>0) c.classList.add('used'); b.appendChild(c); });
+    .forEach(p=>{ const c=card(p,g,scored); if(p.multiplier>0) c.classList.add('used'); b.appendChild(c); });
   w.appendChild(b);
   return w;
 }
 
-function card(p,g,final){
+function card(p,g,scored){
   const c=el('div','pcard');
   const isCap=p.id===g.bot?.captain, isVice=p.id===g.bot?.vice;
   if(isCap) c.classList.add('capt');
@@ -472,14 +474,14 @@ function card(p,g,final){
 
   if(isCap) c.appendChild(el('span','badge','CAPT'));
   else if(isVice) c.appendChild(el('span','badge v','VICE'));
-  else if(final && p.role==='bench' && p.multiplier>0) c.appendChild(el('span','badge on','CAME ON'));
-  else if(final && p.role==='xi' && p.multiplier===0) c.appendChild(el('span','badge off','SUBBED'));
+  else if(scored && p.role==='bench' && p.multiplier>0) c.appendChild(el('span','badge on','CAME ON'));
+  else if(scored && p.role==='xi' && p.multiplier===0) c.appendChild(el('span','badge off','SUBBED'));
 
   c.appendChild(el('div','nm',esc(p.name)));
   c.appendChild(el('div','tm',esc(p.team||'')));
 
   const s=el('div','scores');
-  if(final && p.actual!=null){
+  if(scored && p.actual!=null){
     if(p.projected_now!=null) s.appendChild(el('span','pj',n1(p.projected_now)+' →'));
     const a=el('span','ac',String(p.actual));
     a.style.color = p.projected_now==null ? 'var(--white)'
@@ -491,7 +493,7 @@ function card(p,g,final){
   }
   c.appendChild(s);
 
-  if(final && p.actual!=null && p.projected_now!=null)
+  if(scored && p.actual!=null && p.projected_now!=null)
     c.appendChild(residual(p.actual-p.projected_now));
   return c;
 }
