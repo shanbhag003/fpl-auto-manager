@@ -261,7 +261,120 @@ a cooldown. About $0.05 a gameweek.
 
 ---
 
-## 7. Degrading instead of failing
+## 7. Publishing the decisions
+
+For most of this project the only output was an email to one person. That makes
+a claim like "the model is calibrated" unfalsifiable by anyone else, so the bot
+now publishes what it decided to a static site.
+
+The architecture is deliberately dull: the bot writes JSON to a repository, and
+a single HTML file reads it. No server, no database, no API.
+
+```
+bot (pre-deadline)  ──► data/projections/gw{n}.json   all ~570 players
+                    ──► data/season.json              this gameweek's decision
+
+results pass (6h)   ──► data/season.json              actual points, both squads
+
+index.html          ◄── data/season.json              the whole site
+```
+
+### Why the projections are written before kickoff
+
+This is the only part that actually matters. A projection published after the
+results are known is not a projection.
+
+So `data/projections/gw{n}.json` is committed in the same run that submits the
+team, and it is **write-once** — if the bot runs again before the deadline,
+`season.json` is overwritten but the projections file is not. The commit
+timestamp in the repository is the evidence, and anyone can check it against the
+deadline.
+
+The same rule closes an awkward hole in the human comparison. The benchmark is a
+second, hand-picked FPL entry, and its squad isn't public until after the
+deadline — so scoring that squad against the model would ordinarily mean
+computing its projection after kickoff. Freezing all 570 players rather than just
+the fifteen the bot owns removes the problem entirely: whatever the human picked,
+there is already a number for it from before the match.
+
+### `finished` is not the same as `data_checked`
+
+FPL exposes both. `finished` flips at the final whistle; `data_checked` flips
+once bonus points and Opta corrections have settled, which can be hours later.
+
+An early version of the results pass gated on `finished` and would have frozen
+provisional bonus into the permanent record. It now gates on `data_checked` for
+finality, and carries an in-flight gameweek as `live` — refreshed every six
+hours, corrected as many times as needed, and only ever marked `final` once.
+
+### What the bot decided vs what FPL did
+
+Auto-substitutions are FPL's decision, not the model's. So a bench player who
+came on keeps `role: "bench"` and gains `multiplier: 1`; a starter who was
+subbed out keeps `role: "xi"` with `multiplier: 0`. The site badges them rather
+than moving them.
+
+Conflating the two would flatter the model — an auto-sub that rescued a blank
+gameweek would be credited to a selection it never made.
+
+### Zero is not the same as no data
+
+The first live version showed `0` for every Chelsea player while Chelsea were
+still to kick off. Fabricating a result is worse than showing nothing, and it
+made a perfectly reasonable squad look like a disaster.
+
+The fix reads the fixture list rather than trusting the absence of points, and
+takes a belt-and-braces approach because the fixture flags themselves are
+unreliable:
+
+| Signal | Meaning |
+|---|---|
+| `finished` on a fixture | played and fully processed |
+| `finished_provisional` | played, awaiting processing — also counts as played |
+| `?event=` filter | not always honoured; the event is re-checked in code |
+| player has minutes | has played, whatever the fixture flags say |
+
+That last row is the one that makes it robust. A player with 90 minutes on the
+board cannot be marked as yet to play, no matter what the fixture endpoint
+returns.
+
+### The bar chart was measuring the wrong thing
+
+Each player card carries a small bar. The first version encoded **prediction
+error** — length was how far the model missed, colour was the direction.
+
+It failed immediately in use. A striker who was projected 5.0 and scored 0, and a
+defender projected 4.4 who scored 10, drew almost identical bars, because both
+missed by about five points. Only the colour distinguished a disaster from the
+best return of the week.
+
+It now encodes **points scored**, on a scale shared across the squad, with a pale
+tick marking where the prediction sat. Ten points is visibly twice five, and the
+error is still legible as the gap between bar and tick. Same information,
+readable in a glance instead of requiring a legend.
+
+A recurring theme in this project: the arithmetic was right both times, and the
+choice of what to display was the thing that was wrong.
+
+### Gameweek 1 is a partial record
+
+The publishing layer was built after GW1 had already been played. The bot's GW1
+projections were computed, printed to CloudWatch, rendered onto the emailed
+poster, and then discarded.
+
+Recomputing them afterwards was rejected — the inputs have moved and the results
+are known, so the output would be a fitted number wearing a prediction's
+clothes. They were instead transcribed by hand from the poster, which
+demonstrably predates kickoff, and the projections file for GW1 is flagged
+`partial: true` because it covers fifteen players rather than all 570.
+
+The consequence is that GW1 can be compared at squad level but not at player
+level, and the hand-picked team has no GW1 projection at all. The site says so
+rather than hiding it.
+
+---
+
+## 8. Degrading instead of failing
 
 FPL removed the login endpoint this project was built on. Not deprecated —
 the hostname stopped resolving, and authentication moved to an OAuth2 provider
@@ -277,8 +390,15 @@ The response was to change what failure means:
 | Optimiser layer missing | Pure-Python fallback, ~1% off optimal, logged |
 | Image layer missing | Email sends without the poster |
 | SSM write fails | Logs loudly; never crashes after a live submission |
+| GitHub write fails | Logs; the site goes a gameweek stale, nothing else |
 
 Two outcomes at the auth fork, and neither is a failure.
+
+The publishing layer follows the same rule and is the lowest-priority thing in
+the system. It runs after submission, catches everything, and returns quietly. A
+GitHub outage costs a chart, never a gameweek. Advisory-mode runs still publish,
+tagged `mode: "advisory"`, so the history stays complete even in the weeks the
+token had expired.
 
 ### Things only a live write revealed
 
@@ -294,7 +414,7 @@ Three bugs were invisible to any dry run, because a dry run never posts:
 
 ---
 
-## 8. What isn't solved
+## 9. What isn't solved
 
 **Volatility.** The model scores averages, so it cannot distinguish a reliable
 six from a volatile one — which is exactly the difference that wins a gameweek.
@@ -304,6 +424,8 @@ score, and the model can't see that.
 **Coefficient mismatch.** The regression was fitted to predict *next season*
 from *last season*, but is applied to predict *this gameweek* from *this
 season's rates*. Probably in the right ballpark, not calibrated for the job.
+The published projections now make this measurable rather than theoretical — a
+few gameweeks of residuals will show whether it is bias or variance.
 
 **`ep_next` is capped at 50%.** FPL's own projection may well be good in-season,
 and may use inputs unavailable here — but FPL doesn't publish historical values,
@@ -312,6 +434,11 @@ estimators and no way to rank them, combining beats choosing. The cap is a
 judgement call, not a measured optimum.
 
 **Price changes.** Not modelled at all.
+
+**A benchmark of one.** The comparison is against a single hand-picked entry over
+a single season. That is an anecdote, not evidence — 38 gameweeks against one
+opponent cannot separate a better model from better luck. Overall rank is the
+more honest number, and it is on the page for that reason.
 
 **Token expiry.** Eight hours, refreshed by hand on deadline day. Removing this
 means reverse-engineering the OAuth refresh flow.
