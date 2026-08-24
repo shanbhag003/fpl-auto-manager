@@ -346,6 +346,107 @@ svg{display:block;width:100%;height:auto;overflow:visible}
 </div>
 
 <script>
+
+/* =========================================================================
+   ANALYTICS
+   Paste your IDs below. Leave a string empty to disable that provider —
+   nothing loads and no requests are made.
+
+   This is a single page: switching gameweek changes the hash, not the
+   document. A stock tag would log one pageview and go quiet, so gameweek
+   views, dwell time and scroll depth are sent explicitly.
+   ========================================================================= */
+const ANALYTICS = {
+  ga4:        '',   // 'G-XXXXXXXXXX'      Google Analytics 4
+  clarity:    '',   // 'abcdefghij'        Microsoft Clarity
+  cfBeacon:   '',   // '{token}'           Cloudflare Web Analytics
+};
+
+function loadAnalytics(){
+  if(ANALYTICS.ga4){
+    const s=document.createElement('script'); s.async=true;
+    s.src='https://www.googletagmanager.com/gtag/js?id='+ANALYTICS.ga4;
+    document.head.appendChild(s);
+    window.dataLayer=window.dataLayer||[];
+    window.gtag=function(){window.dataLayer.push(arguments);};
+    gtag('js', new Date());
+    // Manual page_view, so hash changes can send their own.
+    gtag('config', ANALYTICS.ga4, {send_page_view:false});
+  }
+  if(ANALYTICS.clarity){
+    (function(c,l,a,r,i,t,y){
+      c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};
+      t=l.createElement(r); t.async=1;
+      t.src='https://www.clarity.ms/tag/'+i;
+      y=l.getElementsByTagName(r)[0]; y.parentNode.insertBefore(t,y);
+    })(window, document, 'clarity', 'script', ANALYTICS.clarity);
+  }
+  if(ANALYTICS.cfBeacon){
+    const s=document.createElement('script'); s.defer=true;
+    s.src='https://static.cloudflareinsights.com/beacon.min.js';
+    s.setAttribute('data-cf-beacon', JSON.stringify({token:ANALYTICS.cfBeacon}));
+    document.head.appendChild(s);
+  }
+}
+
+function track(name, params){
+  try {
+    if(window.gtag) gtag('event', name, params||{});
+    if(window.clarity) clarity('event', name);
+  } catch(e) { /* analytics must never break the page */ }
+}
+
+function trackPage(gw){
+  try {
+    if(window.gtag) gtag('event','page_view',{
+      page_title: 'Gameweek '+gw,
+      page_location: location.href,
+      page_path: '/gw'+gw,
+    });
+  } catch(e) {}
+}
+
+/* --- dwell time per gameweek ------------------------------------------- */
+let dwellGw = null, dwellFrom = 0, seenDepth = new Set();
+
+function startDwell(gw){
+  flushDwell();
+  dwellGw = gw; dwellFrom = performance.now(); seenDepth = new Set();
+}
+
+function flushDwell(){
+  if(dwellGw == null) return;
+  const secs = Math.round((performance.now() - dwellFrom)/1000);
+  // Sub-2s means they were passing through, not reading.
+  if(secs >= 2) track('gameweek_time', {gw: dwellGw, seconds: secs});
+  dwellGw = null;
+}
+
+addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'hidden') flushDwell();
+  else if(current != null) startDwell(current);
+});
+addEventListener('pagehide', flushDwell);
+
+/* --- scroll depth, reset per gameweek ----------------------------------- */
+let scrollTick = false;
+addEventListener('scroll', () => {
+  if(scrollTick) return;
+  scrollTick = true;
+  requestAnimationFrame(() => {
+    scrollTick = false;
+    const h = document.documentElement.scrollHeight - innerHeight;
+    if(h <= 0) return;
+    const pct = Math.min(100, Math.round((scrollY / h) * 100));
+    [25,50,75,100].forEach(mark => {
+      if(pct >= mark && !seenDepth.has(mark)){
+        seenDepth.add(mark);
+        track('scroll_depth', {gw: current, percent: mark});
+      }
+    });
+  });
+}, {passive:true});
+
 const DATA_URL = 'data/season.json';
 const $ = (s,r=document)=>r.querySelector(s);
 const el = (t,c,h)=>{const n=document.createElement(t);if(c)n.className=c;if(h!=null)n.innerHTML=h;return n;};
@@ -358,6 +459,7 @@ let SEASON=null, current=null;
 init();
 
 async function init(){
+  loadAnalytics();
   try{
     const r = await fetch(DATA_URL+'?t='+Date.now(), {cache:'no-store'});
     if(!r.ok) throw new Error('HTTP '+r.status);
@@ -375,6 +477,12 @@ async function init(){
 
   renderTally();
   renderNav();
+
+  track('site_load', {
+    gameweeks: gws.length,
+    live: SEASON.live_gw != null,
+    entry: (SEASON.entries?.bot?.name || '').slice(0,40),
+  });
 
   const fromHash = parseInt((location.hash||'').replace('#gw',''),10);
   select(gws.some(g=>g.gw===fromHash) ? fromHash : gws[gws.length-1].gw);
@@ -434,8 +542,14 @@ function renderNav(){
 }
 
 function select(gw){
+  const from = current;
   current=gw;
   history.replaceState(null,'','#gw'+gw);
+  const rec = SEASON.gameweeks.find(g=>g.gw===gw);
+  trackPage(gw);
+  track('gameweek_view', {gw, status: rec?.status || 'unknown',
+                          from: from == null ? 'load' : 'gw'+from});
+  startDwell(gw);
   document.querySelectorAll('.gwbtn,.chip').forEach(b=>
     b.setAttribute('aria-current', String(+b.dataset.gw===gw)));
   const active=document.querySelector(`.chip[aria-current="true"]`);
@@ -527,6 +641,7 @@ function clock(g){
     TZ_UTC = !TZ_UTC;
     try { localStorage.setItem('fpl-tz', TZ_UTC ? 'utc' : 'local'); } catch(e) {}
     btn.textContent = TZ_UTC ? LOCAL_ZONE : 'UTC';
+    track('timezone_toggle', {mode: TZ_UTC ? 'utc' : 'local'});
     wrap.querySelectorAll('b[data-t]').forEach(b => {
       if(b.dataset.t) b.textContent = fmt(b.dataset.t);
     });
@@ -565,6 +680,9 @@ function clock(g){
 function guide(g, scored){
   const d = document.createElement('details');
   d.className = 'guide';          // closed by default; opened on demand
+  d.addEventListener('toggle', () => {
+    if(d.open) track('guide_open', {gw: current});
+  });
 
   const sum = el('summary');
   sum.innerHTML = 'How to read this <span class="chev">⌄</span>';
