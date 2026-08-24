@@ -139,15 +139,34 @@ def main():
 
     # A zero means nothing until the player's fixture has actually been played.
     # Chelsea kicking off tomorrow is not the same as Chelsea blanking.
-    fixtures = get(f'{FPL}/fixtures/?event={GW}') or []
+    #
+    # Two traps here. FPL sets `finished` only once a match is fully processed;
+    # between the final whistle and that, it is `finished_provisional`. And the
+    # ?event= filter is not always honoured, so the event is re-checked in code
+    # rather than trusted — otherwise all 380 fixtures come back and every club
+    # looks unplayed.
+    all_fx = get(f'{FPL}/fixtures/?event={GW}') or []
+    fixtures = [f for f in all_fx if int(f.get('event') or 0) == GW]
+    if len(fixtures) != len(all_fx):
+        print(f"  (endpoint returned {len(all_fx)} fixtures; "
+              f"{len(fixtures)} belong to GW{GW})")
+
     unplayed_teams = set()
     for fx in fixtures:
-        if not fx.get('finished'):
-            unplayed_teams.add(int(fx['team_h']))
-            unplayed_teams.add(int(fx['team_a']))
-    if unplayed_teams:
-        print(f"  {len(unplayed_teams)} club(s) still to play: "
-              + ", ".join(sorted(teams[t] for t in unplayed_teams)))
+        done = bool(fx.get('finished') or fx.get('finished_provisional'))
+        h, a = int(fx['team_h']), int(fx['team_a'])
+        print(f"  {teams[h]:>4} v {teams[a]:<4}  "
+              f"{'played' if done else 'to play'}")
+        if not done:
+            unplayed_teams.add(h)
+            unplayed_teams.add(a)
+
+    if not fixtures:
+        print("  ! no fixtures found for this gameweek — treating everything "
+              "as played and relying on minutes instead.")
+    print(f"  {len(unplayed_teams)} club(s) still to play"
+          + (": " + ", ".join(sorted(teams[t] for t in unplayed_teams))
+             if unplayed_teams else ""))
     bot_picks = get(f'{FPL}/entry/{BOT_ID}/event/{GW}/picks/')
     human_picks = get(f'{FPL}/entry/{HUMAN_ID}/event/{GW}/picks/')
     if not bot_picks:
@@ -167,6 +186,8 @@ def main():
                 order += 1
             st = live.get(pid, {})
             pending = int(e['team']) in unplayed_teams
+            if (st.get('minutes') or 0) > 0 or st.get('total_points'):
+                pending = False        # already on the pitch; the flag is stale
             squad.append({
                 'id': pid, 'name': e['web_name'], 'pos': POS[int(e['element_type'])],
                 'team': teams[int(e['team'])], 'cost': int(e['now_cost']),
@@ -224,6 +245,8 @@ def main():
                 horder += 1
             st = live.get(pid, {})
             hpending = int(e.get('team', 0)) in unplayed_teams
+            if (st.get('minutes') or 0) > 0 or st.get('total_points'):
+                hpending = False
             human_squad.append({
                 'id': pid, 'name': e.get('web_name', str(pid)),
                 'pos': POS.get(int(e.get('element_type', 0)), '?'),
