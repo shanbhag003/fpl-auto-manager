@@ -79,6 +79,9 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .gwbtn .r{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--lav)}
 .gwbtn .r b{font-weight:600;color:var(--white)}
 .gwbtn .r .pend{color:var(--lavd)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--amber);flex:0 0 6px;
+  animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 
 /* ---------- main ---------- */
 .main{flex:1;min-width:0;padding:32px 28px 72px}
@@ -88,6 +91,20 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .head h2{font-family:var(--display);font-size:clamp(34px,7vw,56px);font-weight:700;letter-spacing:-.025em;line-height:1.02;margin:6px 0 8px}
 .head p{color:var(--lav);font-size:15px;max-width:62ch}
 
+.clock{display:flex;flex-direction:column;gap:5px;margin-top:16px;
+  padding:11px 14px;border-radius:11px;border:1px solid var(--line);
+  background:rgba(255,255,255,.03);align-self:flex-start;max-width:100%}
+.ct{display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+  font-family:var(--mono);font-size:11.5px;letter-spacing:.02em;color:var(--lav)}
+.ct .k{font-size:9.5px;font-weight:600;letter-spacing:.15em;text-transform:uppercase;
+  color:var(--lavd);min-width:82px}
+.ct b{font-weight:600;color:var(--white)}
+.ct.dim b{color:var(--lav);font-weight:400}
+.tz{font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.12em;
+  text-transform:uppercase;padding:3px 9px;border-radius:999px;
+  border:1px solid var(--line);color:var(--lavd);
+  transition:border-color .15s,color .15s,background .15s}
+.tz:hover{border-color:rgba(0,255,135,.45);color:var(--mint);background:rgba(0,255,135,.07)}
 .flags{display:flex;flex-wrap:wrap;gap:7px;margin-top:14px}
 .flag{
   font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
@@ -234,6 +251,9 @@ svg{display:block;width:100%;height:auto;overflow:visible}
     background:var(--card);font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--lav);white-space:nowrap}
   .chip[aria-current="true"]{background:var(--mint);border-color:var(--mint);color:#04120A;font-weight:600}
 
+  .clock{width:100%;padding:10px 12px}
+  .ct{font-size:10.5px;gap:7px}
+  .ct .k{min-width:0;flex:0 0 100%;margin-bottom:1px}
   .verdict{grid-template-columns:1fr;gap:1px}
   .vcell{display:flex;align-items:baseline;justify-content:space-between;padding:14px 15px}
   .vcell .lbl{margin-bottom:0}
@@ -370,7 +390,9 @@ function renderNav(){
     const bp=g.bot?.actual?.total, hp=g.human?.actual?.total;
     const b=el('button','gwbtn');
     b.dataset.gw=g.gw;
+    const isLive = g.status==='live';
     b.innerHTML=`<span class="n">GW${g.gw}</span>
+      ${isLive?'<span class="dot" title="in progress"></span>':''}
       <span class="r">${bp==null?'<span class="pend">pending</span>'
         :`<b>${bp}</b>${hp!=null?` <span style="color:var(--lavd)">/ ${hp}</span>`:''}`}</span>`;
     b.onclick=()=>select(g.gw);
@@ -407,9 +429,13 @@ function render(g){
     <p>${scored
       ? 'Every projection below was committed before kickoff. The number beside it is what happened.'
       : 'Every number is the bot&rsquo;s projection for this gameweek. Results appear once the matches are played.'}</p>`;
+  head.appendChild(clock(g));
+
   const flags=el('div','flags');
   flags.append(
-    pill(final?'Final':scored?'Provisional — bonus not confirmed':'Awaiting results',
+    pill(final ? 'Final'
+         : scored ? 'Live — provisional, bonus not confirmed'
+         : 'Awaiting kickoff',
          final?'ok':'live'),
     pill(g.mode==='automated'?'Submitted automatically':g.mode==='advisory'?'Advisory — applied by hand':'Mode unknown'),
     pill(money(g.bot?.value||0)+' squad'),
@@ -435,6 +461,75 @@ function render(g){
 function pointScale(g){
   const v=(g.bot?.squad||[]).map(p=>Math.max(p.actual??0, p.projected_now??0));
   return Math.max(10, Math.ceil(Math.max(...v,0)));
+}
+
+/* ---------- time strip: when this last refreshed, and when it next will ---- */
+let TZ_UTC = false;
+try { TZ_UTC = localStorage.getItem('fpl-tz') === 'utc'; } catch(e) {}
+
+const LOCAL_ZONE = (() => {
+  try {
+    const z = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    return z.split('/').pop().replace(/_/g,' ') || 'Local';
+  } catch(e) { return 'Local'; }
+})();
+
+function fmt(iso){
+  const d = new Date(iso);
+  if(isNaN(d)) return '—';
+  const o = {day:'numeric', month:'short', year:'numeric',
+             hour:'2-digit', minute:'2-digit', hour12:false};
+  if(TZ_UTC) o.timeZone = 'UTC';
+  return d.toLocaleString('en-GB', o).replace(',', '') +
+         ' ' + (TZ_UTC ? 'UTC' : LOCAL_ZONE);
+}
+
+function clock(g){
+  const wrap = el('div','clock');
+  const gen  = SEASON.generated_at;
+  const every = SEASON.refresh_interval_hours || 6;
+  const nd   = SEASON.next_deadline;
+
+  const line1 = el('div','ct');
+  line1.innerHTML = `<span class="k">Updated</span><b data-t="${gen||''}">${gen?fmt(gen):'—'}</b>`;
+  const btn = el('button','tz', TZ_UTC ? LOCAL_ZONE : 'UTC');
+  btn.setAttribute('aria-label','Switch time zone');
+  btn.onclick = () => {
+    TZ_UTC = !TZ_UTC;
+    try { localStorage.setItem('fpl-tz', TZ_UTC ? 'utc' : 'local'); } catch(e) {}
+    btn.textContent = TZ_UTC ? LOCAL_ZONE : 'UTC';
+    wrap.querySelectorAll('b[data-t]').forEach(b => {
+      if(b.dataset.t) b.textContent = fmt(b.dataset.t);
+    });
+  };
+  line1.appendChild(btn);
+  wrap.appendChild(line1);
+
+  // Next refresh is the last one plus the schedule interval; if that has
+  // already passed, the next run is imminent rather than overdue.
+  let nextIso = null, note = '';
+  if(gen){
+    const t = new Date(gen).getTime() + every*3600*1000;
+    nextIso = new Date(t).toISOString();
+    if(t < Date.now()) note = 'due now';
+  }
+  const line2 = el('div','ct dim');
+  if(g.status==='live'){
+    line2.innerHTML = `<span class="k">Next update</span>` +
+      (note ? `<b>due now</b>` : `<b data-t="${nextIso}">${fmt(nextIso)}</b>`) +
+      `<span style="color:var(--lavd)">· live scores, every ${every}h</span>`;
+  }else if(nd && nd.time){
+    line2.innerHTML = `<span class="k">Next update</span>` +
+      `<b data-t="${nd.time}">${fmt(nd.time)}</b>` +
+      `<span style="color:var(--lavd)">· GW${nd.gw} deadline</span>`;
+  }else if(nextIso){
+    line2.innerHTML = `<span class="k">Next update</span>` +
+      (note ? `<b>due now</b>` : `<b data-t="${nextIso}">${fmt(nextIso)}</b>`);
+  }else{
+    line2.innerHTML = `<span class="k">Next update</span><b>—</b>`;
+  }
+  wrap.appendChild(line2);
+  return wrap;
 }
 
 function pill(text,cls){ return el('span','flag'+(cls?' '+cls:''), esc(text)); }
@@ -654,8 +749,20 @@ function foot(){
   const f=el('div','foot');
   const from=SEASON.instrumented_from_gw;
   f.innerHTML=`<div class="eyebrow">Autonomous FPL System</div>
-    <div class="eyebrow dim">${from?`Projections recorded from GW${from} · `:''}Python · Linear programming · AWS Lambda</div>`;
+    <div class="eyebrow dim">${from?`Projections from GW${from} · `:''}Python · Linear programming · AWS Lambda</div>`;
   return f;
+}
+
+function ago(iso){
+  if(!iso) return 'Python · Linear programming · AWS Lambda';
+  const t=new Date(iso);
+  if(isNaN(t)) return '';
+  const m=Math.round((Date.now()-t)/60000);
+  if(m<2)   return 'Updated just now';
+  if(m<60)  return `Updated ${m} minutes ago`;
+  const hrs=Math.round(m/60);
+  if(hrs<24) return `Updated ${hrs} hour${hrs>1?'s':''} ago`;
+  return `Updated ${Math.round(hrs/24)} day${hrs>=48?'s':''} ago`;
 }
 </script>
 </body>
