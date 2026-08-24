@@ -1,8 +1,6 @@
 name: Seed GW1
 
-# Manual only. Click "Run workflow" in the Actions tab.
-# Nothing about this runs on a schedule — it exists to write the one gameweek
-# whose projections predate the snapshot layer.
+# Manual only. Actions tab -> Seed GW1 -> Run workflow.
 
 on:
   workflow_dispatch:
@@ -16,27 +14,48 @@ jobs:
   seed:
     runs-on: ubuntu-latest
     permissions:
-      contents: write        # lets the built-in token commit; no PAT needed
+      contents: write        # the built-in token commits; no PAT needed
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+
+      - name: Find the script
+        run: |
+          echo "--- repository root ---"
+          ls -la
+          if [ ! -f seed_gw1.py ]; then
+            echo ""
+            echo "seed_gw1.py is not in the repository root. Found instead:"
+            find . -name 'seed_gw1.py' -not -path './.git/*' || echo "  (nowhere in the repo)"
+            echo ""
+            echo "Move it to the root, or upload it there, and re-run."
+            exit 1
+          fi
+          echo "OK: seed_gw1.py found"
 
       - name: Install requests
         run: pip install --quiet requests
 
       - name: Build the GW1 record
-        run: python seed_gw1.py ${{ inputs.force && '--yes' || '' }}
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          ARGS=""
+          if [ "$FORCE" = "true" ]; then ARGS="--yes"; fi
+          echo "Running: python seed_gw1.py $ARGS"
+          python seed_gw1.py $ARGS
 
       - name: Show what it produced
         run: |
           echo "--- data/season.json ---"
-          python -m json.tool data/season.json | head -60
-          echo "--- projections ---"
-          python -m json.tool data/projections/gw1.json | head -20
+          python -m json.tool data/season.json | head -80
+          echo ""
+          echo "--- data/projections/gw1.json ---"
+          python -m json.tool data/projections/gw1.json | head -25
 
       - name: Commit
         run: |
