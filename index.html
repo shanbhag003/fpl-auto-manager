@@ -123,8 +123,10 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
   width:64%;height:128%;border:1px solid rgba(255,255,255,.05);border-radius:50%/12%;
   pointer-events:none;
 }
-.row{display:flex;justify-content:center;flex-wrap:wrap;gap:9px;margin-bottom:18px}
-.row:last-child{margin-bottom:0}
+.line{margin-bottom:18px}
+.line:last-child{margin-bottom:0}
+.line-label{display:none}
+.row{display:flex;justify-content:center;flex-wrap:wrap;gap:9px}
 
 .pcard{
   position:relative;width:112px;padding:9px 8px 7px;border-radius:12px;
@@ -140,10 +142,13 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .scores .ac{font-family:var(--display);font-size:20px;font-weight:700;line-height:1}
 .scores.pending .pj{font-family:var(--display);font-size:19px;font-weight:700;color:var(--mint)}
 
-/* the residual bar — how wrong the model was, per player */
-.resid{position:relative;height:3px;margin-top:7px;border-radius:2px;background:rgba(255,255,255,.09)}
-.resid i{position:absolute;top:0;height:3px;border-radius:2px;display:block}
-.resid .mid{position:absolute;left:50%;top:-2px;width:1px;height:7px;background:rgba(255,255,255,.22)}
+/* points bar: length is points scored, the tick is where the model predicted */
+.pbar{position:relative;height:4px;margin-top:8px;border-radius:2px;background:rgba(255,255,255,.09)}
+.pbar i{position:absolute;left:0;top:0;height:4px;border-radius:2px;display:block;min-width:2px}
+.pbar .tick{position:absolute;top:-3px;width:1.5px;height:10px;border-radius:1px;
+  background:var(--lav);opacity:.85;transform:translateX(-.75px)}
+.pcard.toplay{border-style:dashed;opacity:.85}
+.pcard.toplay .scores .pj{color:var(--lav)}
 
 .badge{
   position:absolute;top:-8px;left:50%;transform:translateX(-50%);
@@ -154,6 +159,8 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .badge.on{background:rgba(0,255,135,.18);color:var(--mint);border:1px solid rgba(0,255,135,.45)}
 .badge.off{background:rgba(255,93,122,.15);color:var(--rose);border:1px solid rgba(255,93,122,.4)}
 
+.tolabel{font-family:var(--mono);font-size:8px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--lavd);margin-top:8px}
 .benchwrap{text-align:center;margin-bottom:34px}
 .benchwrap .eyebrow{display:block;margin-bottom:11px}
 .bench{display:flex;justify-content:center;flex-wrap:wrap;gap:8px}
@@ -231,14 +238,29 @@ svg{display:block;width:100%;height:auto;overflow:visible}
   .vcell{display:flex;align-items:baseline;justify-content:space-between;padding:14px 15px}
   .vcell .lbl{margin-bottom:0}
   .vcell .note{margin-top:0}
-  .pitch{padding:22px 8px 16px}
-  .row{gap:6px;margin-bottom:14px}
-  .pcard{width:calc(33.333% - 4px);max-width:112px;padding:8px 5px 6px}
+  .pitch{padding:12px 10px 14px;background:none;border:none}
+  .pitch::before{display:none}          /* the centre circle reads as clutter here */
+  .line{margin-bottom:12px;padding:11px 8px 13px;border-radius:13px;
+    background:rgba(255,255,255,.026);border:1px solid rgba(255,255,255,.075)}
+  .line-label{display:flex;align-items:center;gap:9px;margin:0 4px 11px;
+    font-family:var(--mono);font-size:9px;font-weight:600;letter-spacing:.17em;
+    text-transform:uppercase;color:var(--lavd)}
+  .line-label::after{content:'';flex:1;height:1px;background:rgba(255,255,255,.11)}
+  .line-label b{font-weight:600;color:var(--lav)}
+  .line-gk .line-label{color:var(--amber)}
+  .line-def .line-label,.line-mid .line-label,.line-fwd .line-label{color:var(--lavd)}
+  .row{gap:6px}
+  .pcard{width:calc(33.333% - 5px);max-width:112px;padding:8px 5px 6px}
   .pcard .nm{font-size:12.5px}
   .scores .ac{font-size:17px}
   .scores.pending .pj{font-size:16px}
-  .bench .pcard{width:calc(25% - 6px)}
-  .bench .pcard .nm{font-size:11px}
+  .benchwrap{padding:11px 8px 13px;border-radius:13px;
+    background:rgba(255,255,255,.018);border:1px dashed rgba(255,255,255,.09)}
+  .benchwrap .eyebrow{margin-bottom:11px}
+  .bench{gap:6px}
+  .bench .pcard{width:calc(25% - 5px);padding:8px 4px 6px}
+  .bench .pcard .nm{font-size:10.5px}
+  .bench .pcard .tm{font-size:7.5px}
   .tf{grid-template-columns:1fr}
   .tf .meta{text-align:left}
   .tf .swap{font-size:15px}
@@ -393,6 +415,8 @@ function render(g){
     pill(money(g.bot?.value||0)+' squad'),
     pill(g.bot?.formation||''),
   );
+  const topl=(g.bot?.squad||[]).filter(p=>p.pending).length;
+  if(topl) flags.append(pill(topl+' still to play','live'));
   if(!g.instrumented) flags.append(pill('No projection recorded'));
   head.appendChild(flags);
   v.appendChild(head);
@@ -404,6 +428,13 @@ function render(g){
   if(g.news?.length) v.appendChild(news(g));
   v.appendChild(chart());
   v.appendChild(foot());
+}
+
+// Shared y-axis for the points bars: the squad's best return, floored at 10
+// so a quiet week doesn't inflate every bar.
+function pointScale(g){
+  const v=(g.bot?.squad||[]).map(p=>Math.max(p.actual??0, p.projected_now??0));
+  return Math.max(10, Math.ceil(Math.max(...v,0)));
 }
 
 function pill(text,cls){ return el('span','flag'+(cls?' '+cls:''), esc(text)); }
@@ -442,31 +473,43 @@ function diff(d,label){
   return s;
 }
 
+const LINES=[['GK','Goalkeeper','Goalkeepers'],
+             ['DEF','Defence','Defence'],
+             ['MID','Midfield','Midfield'],
+             ['FWD','Attack','Attack']];
+
 function pitch(g,scored){
   const wrap=el('div','pitch');
+  const scale=pointScale(g);
   const xi=(g.bot?.squad||[]).filter(p=>p.role==='xi');
-  [['GK'],['DEF'],['MID'],['FWD']].forEach(([pos])=>{
+  LINES.forEach(([pos,one,many])=>{
+    const players=xi.filter(p=>p.pos===pos)
+      .sort((a,b)=>(b.projected_now??0)-(a.projected_now??0));
+    if(!players.length) return;
+    const line=el('div','line line-'+pos.toLowerCase());
+    line.appendChild(el('div','line-label',
+      `${players.length===1?one:many} <b>${players.length}</b>`));
     const row=el('div','row');
-    xi.filter(p=>p.pos===pos)
-      .sort((a,b)=>(b.projected_now??0)-(a.projected_now??0))
-      .forEach(p=>row.appendChild(card(p,g,scored)));
-    if(row.children.length) wrap.appendChild(row);
+    players.forEach(p=>row.appendChild(card(p,g,scored,scale)));
+    line.appendChild(row);
+    wrap.appendChild(line);
   });
   return wrap;
 }
 
 function bench(g,scored){
   const w=el('div','benchwrap');
+  const scale=pointScale(g);
   w.appendChild(el('div','eyebrow dim','Bench, in order'));
   const b=el('div','bench');
   (g.bot?.squad||[]).filter(p=>p.role==='bench')
     .sort((a,b)=>(a.bench_order??9)-(b.bench_order??9))
-    .forEach(p=>{ const c=card(p,g,scored); if(p.multiplier>0) c.classList.add('used'); b.appendChild(c); });
+    .forEach(p=>{ const c=card(p,g,scored,scale); if(p.multiplier>0) c.classList.add('used'); b.appendChild(c); });
   w.appendChild(b);
   return w;
 }
 
-function card(p,g,scored){
+function card(p,g,scored,scale){
   const c=el('div','pcard');
   const isCap=p.id===g.bot?.captain, isVice=p.id===g.bot?.vice;
   if(isCap) c.classList.add('capt');
@@ -481,6 +524,15 @@ function card(p,g,scored){
   c.appendChild(el('div','tm',esc(p.team||'')));
 
   const s=el('div','scores');
+  if(p.pending || (scored && p.actual==null)){
+    // fixture hasn't been played — a zero here would be a lie
+    c.classList.add('toplay');
+    s.className='scores pending';
+    s.appendChild(el('span','pj',n1(p.projected_now)));
+    c.appendChild(s);
+    c.appendChild(el('div','tolabel','To play'));
+    return c;
+  }
   if(scored && p.actual!=null){
     if(p.projected_now!=null) s.appendChild(el('span','pj',n1(p.projected_now)+' →'));
     const a=el('span','ac',String(p.actual));
@@ -493,22 +545,28 @@ function card(p,g,scored){
   }
   c.appendChild(s);
 
-  if(scored && p.actual!=null && p.projected_now!=null)
-    c.appendChild(residual(p.actual-p.projected_now));
+  if(scored && p.actual!=null) c.appendChild(pointsBar(p, scale));
   return c;
 }
 
-// how wrong the model was on this player, centred at zero, clamped at ±8
-function residual(d){
-  const r=el('div','resid');
-  const w=Math.min(Math.abs(d),8)/8*50;
+// Length = points actually scored, on a scale shared across the whole squad,
+// so a 10 is visibly twice a 5. The pale tick is where the model predicted.
+function pointsBar(p, scale){
+  const r=el('div','pbar');
+  const pts=Math.max(0,p.actual);
   const bar=el('i');
-  bar.style.width=w+'%';
-  bar.style.background = d>=0?'var(--mint)':'var(--rose)';
-  if(d>=0) bar.style.left='50%'; else bar.style.right='50%';
+  bar.style.width=Math.min(100,(pts/scale)*100)+'%';
+  const beat = p.projected_now==null || p.actual>=p.projected_now;
+  bar.style.background = beat?'var(--mint)':'var(--rose)';
   r.appendChild(bar);
-  r.appendChild(el('span','mid'));
-  r.title = (d>0?'+':'')+n1(d)+' vs projection';
+  if(p.projected_now!=null){
+    const t=el('span','tick');
+    t.style.left=Math.min(100,(Math.max(0,p.projected_now)/scale)*100)+'%';
+    r.appendChild(t);
+    r.title=`${p.actual} pts · model said ${n1(p.projected_now)}`;
+  }else{
+    r.title=`${p.actual} pts`;
+  }
   return r;
 }
 

@@ -136,6 +136,18 @@ def main():
 
     live = {int(e['id']): e.get('stats', {})
             for e in (get(f'{FPL}/event/{GW}/live/') or {}).get('elements', [])}
+
+    # A zero means nothing until the player's fixture has actually been played.
+    # Chelsea kicking off tomorrow is not the same as Chelsea blanking.
+    fixtures = get(f'{FPL}/fixtures/?event={GW}') or []
+    unplayed_teams = set()
+    for fx in fixtures:
+        if not fx.get('finished'):
+            unplayed_teams.add(int(fx['team_h']))
+            unplayed_teams.add(int(fx['team_a']))
+    if unplayed_teams:
+        print(f"  {len(unplayed_teams)} club(s) still to play: "
+              + ", ".join(sorted(teams[t] for t in unplayed_teams)))
     bot_picks = get(f'{FPL}/entry/{BOT_ID}/event/{GW}/picks/')
     human_picks = get(f'{FPL}/entry/{HUMAN_ID}/event/{GW}/picks/')
     if not bot_picks:
@@ -154,19 +166,23 @@ def main():
             if role == 'bench':
                 order += 1
             st = live.get(pid, {})
+            pending = int(e['team']) in unplayed_teams
             squad.append({
                 'id': pid, 'name': e['web_name'], 'pos': POS[int(e['element_type'])],
                 'team': teams[int(e['team'])], 'cost': int(e['now_cost']),
                 'role': role, 'bench_order': order if role == 'bench' else None,
                 'multiplier': mult.get(pid, 1 if role == 'xi' else 0),
                 'projected_now': proj, 'projected_run': None,
-                'actual': st.get('total_points'), 'minutes': st.get('minutes'),
+                'actual': None if pending else st.get('total_points'),
+                'minutes': None if pending else st.get('minutes'),
+                'pending': pending,
                 'note': None,
             })
             projections[str(pid)] = [proj, None]
             flag = '' if pid in submitted else '   <-- NOT in the submitted GW1 squad'
+            got = 'yet to play' if pending else st.get('total_points')
             print(f"  {e['web_name']:16} {teams[int(e['team'])]:4} id={pid:<4} "
-                  f"proj {proj:>5.2f}  actual {st.get('total_points')}{flag}")
+                  f"proj {proj:>5.2f}  actual {got}{flag}")
 
     got = {p['id'] for p in squad}
     if got != submitted:
@@ -207,6 +223,7 @@ def main():
             if not starter:
                 horder += 1
             st = live.get(pid, {})
+            hpending = int(e.get('team', 0)) in unplayed_teams
             human_squad.append({
                 'id': pid, 'name': e.get('web_name', str(pid)),
                 'pos': POS.get(int(e.get('element_type', 0)), '?'),
@@ -219,7 +236,9 @@ def main():
                 # cannot be scored against the model for this gameweek. Left
                 # null rather than recomputed after the fact.
                 'projected_now': None, 'projected_run': None,
-                'actual': st.get('total_points'), 'minutes': st.get('minutes'),
+                'actual': None if hpending else st.get('total_points'),
+                'minutes': None if hpending else st.get('minutes'),
+                'pending': hpending,
                 'note': None,
             })
 
