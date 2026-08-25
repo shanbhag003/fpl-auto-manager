@@ -76,10 +76,21 @@ def background():
     return Image.blend(img, Image.blend(img, glow, 0.55), 0.75)
 
 
-def mono_caps(d, xy, text, size, colour, track=4):
-    """Letter-spaced uppercase mono, the way the poster sets small labels."""
+def caps_width(d, text, size, track=4):
+    f = font('mono', size, 600)
+    return sum(d.textlength(c, font=f) + track for c in text.upper()) - track
+
+
+def mono_caps(d, xy, text, size, colour, track=4, anchor='l'):
+    """Letter-spaced uppercase mono, the way the poster sets small labels.
+
+    anchor='r' treats x as the RIGHT edge, which is what makes a stacked
+    number and caption line up flush instead of drifting apart.
+    """
     f = font('mono', size, 600)
     x, y = xy
+    if anchor == 'r':
+        x -= caps_width(d, text, size, track)
     for ch in text.upper():
         d.text((x, y), ch, font=f, fill=colour)
         x += d.textlength(ch, font=f) + track
@@ -115,62 +126,82 @@ def build(season, g):
     names = season.get('entries', {})
 
     # ---- header
-    y = 84
+    y = 76
     mono_caps(d, (M, y), 'autonomous fpl system', 21, MINT, 5)
-    y += 46
-    d.text((M, y), f"Gameweek {g['gw']}", font=font('display', 104, 700), fill=WHITE)
-    y += 132
+    y += 44
+    d.text((M, y), f"Gameweek {g['gw']}", font=font('display', 98, 700), fill=WHITE)
+    y += 124
     sub = ("It published every prediction before kickoff."
            if g.get('instrumented') else "Results only for this gameweek.")
-    d.text((M, y), sub, font=font('body', 30, 400), fill=LAV)
-    y += 78
+    d.text((M, y), sub, font=font('body', 29, 400), fill=LAV)
+    y += 70
 
     # ---- the headline pair: projected vs actual
-    card_h = 250
+    # Two columns of equal width, both numbers on one baseline, and the delta
+    # on its own full-width strip below a hairline — it used to run across the
+    # column divider into the right-hand number.
+    PAD = 42
+    NUM = 96
+    card_h = 272
     rounded(d, [M, y, W - M, y + card_h], 26,
             fill=(38, 9, 47), outline=(70, 25, 82), width=2)
-    half = W / 2
-    mono_caps(d, (M + 40, y + 38), 'it predicted', 19, LAVD, 4)
-    d.text((M + 40, y + 78), f"{proj:.1f}" if proj is not None else "—",
-           font=font('display', 108, 700), fill=LAV)
-    mono_caps(d, (half + 28, y + 38), 'it scored', 19, LAVD, 4)
-    # Mint would read as success even on a miss, so the headline number carries
-    # the verdict rather than the brand colour.
-    beat = proj is None or act >= proj
-    d.text((half + 28, y + 78), str(act), font=font('display', 108, 700),
-           fill=MINT if beat else ROSE)
-    d.line([(half, y + 34), (half, y + card_h - 34)], fill=(74, 28, 86), width=2)
 
+    inner_l = M + PAD
+    inner_r = W - M - PAD
+    col_w = (inner_r - inner_l) / 2
+    divider_x = inner_l + col_w + 4
+    label_y = y + 38
+    num_y = y + 76
+
+    mono_caps(d, (inner_l, label_y), 'it predicted', 19, LAVD, 4)
+    d.text((inner_l, num_y), f"{proj:.1f}" if proj is not None else "—",
+           font=font('display', NUM, 700), fill=LAV)
+
+    mono_caps(d, (divider_x + 32, label_y), 'it scored', 19, LAVD, 4)
+    beat = proj is None or act >= proj
+    d.text((divider_x + 32, num_y), str(act),
+           font=font('display', NUM, 700), fill=MINT if beat else ROSE)
+
+    d.line([(divider_x, label_y - 4), (divider_x, num_y + NUM + 6)],
+           fill=(74, 28, 86), width=2)
+
+    rule_y = y + card_h - 78
+    d.line([(inner_l, rule_y), (inner_r, rule_y)], fill=(70, 25, 82), width=2)
     if proj is not None:
         diff = act - proj
         col = MINT if diff >= 0 else ROSE
-        label = f"{'+' if diff > 0 else ''}{diff:.1f} vs its own projection"
-        d.text((M + 40, y + 196), label, font=font('mono', 26, 600), fill=col)
-    y += card_h + 34
+        sign = '+' if diff > 0 else '\u2212'
+        d.text((inner_l, rule_y + 22),
+               f"{sign}{abs(diff):.1f} against its own projection",
+               font=font('mono', 27, 600), fill=col)
+    y += card_h + 28
 
     # ---- human comparison
     if hum is not None:
-        rounded(d, [M, y, W - M, y + 176], 26,
+        h2 = 172
+        rounded(d, [M, y, W - M, y + h2], 26,
                 fill=(30, 6, 38), outline=(64, 22, 76), width=2)
         gap = act - hum
         bot_leads = gap > 0
-        mono_caps(d, (M + 40, y + 34), 'the bot', 18, LAVD, 4)
-        d.text((M + 40, y + 68), str(act), font=font('display', 72, 700),
+        lab_y = y + 40
+        val_y = y + 74
+        d.text((inner_l, val_y), str(act), font=font('display', 68, 700),
                fill=MINT if bot_leads else WHITE)
-        mono_caps(d, (M + 320, y + 34), 'hand-picked by me', 18, LAVD, 4)
-        d.text((M + 320, y + 68), str(hum), font=font('display', 72, 700),
-               fill=MINT if not bot_leads else WHITE)
-        verdict = ("bot ahead" if gap > 0 else "human ahead" if gap < 0 else "level")
-        gtxt = f"{'+' if gap > 0 else ''}{gap}"
-        gfont = font('display', 60, 700)
-        gw_ = d.textlength(gtxt, font=gfont)
-        # measure the caption so both sit flush to the same right edge
-        vfont = font('mono', 17, 600)
-        vw_ = sum(d.textlength(c, font=vfont) + 3 for c in verdict.upper())
-        right = W - M - 40
-        d.text((right - gw_, y + 52), gtxt, font=gfont, fill=AMBER)
-        mono_caps(d, (right - vw_, y + 122), verdict, 17, LAVD, 3)
-        y += 176 + 34
+        mono_caps(d, (inner_l, lab_y), 'the bot', 18, LAVD, 4)
+
+        mid_x = inner_l + 250
+        mono_caps(d, (mid_x, lab_y), 'hand-picked by me', 18, LAVD, 4)
+        d.text((mid_x, val_y), str(hum), font=font('display', 68, 700),
+               fill=WHITE if bot_leads else MINT)
+
+        # margin: number and caption share one right edge and one baseline
+        gtxt = f"{'+' if gap > 0 else '\u2212'}{abs(gap)}"
+        gfont = font('display', 62, 700)
+        gwid = d.textlength(gtxt, font=gfont)
+        d.text((inner_r - gwid, val_y + 4), gtxt, font=gfont, fill=AMBER)
+        verdict = 'bot ahead' if gap > 0 else 'human ahead' if gap < 0 else 'level'
+        mono_caps(d, (inner_r, val_y + 80), verdict, 18, LAVD, 3, anchor='r')
+        y += h2 + 28
 
     # ---- captain and the biggest miss, the two things people argue about
     squad = bot.get('squad', [])
@@ -192,31 +223,36 @@ def build(season, g):
                     rows.append((label, p)); used.add(id(p)); break
 
     rows = rows[:3]
-    block = len(rows) * 112 + max(0, len(rows) - 1) * 18
-    footer_top = H - 142
-    y = max(y, footer_top - block - 28)
+    footer_rule = H - 148
+    row_gap = 16
+    avail = (footer_rule - 40) - y
+    n = max(1, len(rows))
+    row_h = int(min(112, (avail - row_gap * (n - 1)) / n))
+    block = n * row_h + row_gap * (n - 1)
+    y = (footer_rule - 40) - block          # sit flush above the rule
 
     for label, p in rows:
-        rounded(d, [M, y, W - M, y + 112], 20,
-                fill=(255, 255, 255, 0) if False else (32, 7, 40),
-                outline=(60, 20, 72), width=2)
-        mono_caps(d, (M + 34, y + 26), label, 17, LAVD, 3)
-        d.text((M + 34, y + 54), p['name'], font=font('display', 40, 700), fill=WHITE)
+        rounded(d, [M, y, W - M, y + row_h], 20,
+                fill=(32, 7, 40), outline=(60, 20, 72), width=2)
+        mono_caps(d, (M + 36, y + int(row_h * 0.20)), label, 17, LAVD, 3)
+        d.text((M + 36, y + int(row_h * 0.42)), p['name'],
+               font=font('display', 38, 700), fill=WHITE)
         delta = p['actual'] - p['projected_now']
         col = MINT if delta >= 0 else ROSE
-        txt = f"{p['projected_now']:.1f} → {p['actual']}"
-        tf = font('mono', 34, 600)
-        tw = d.textlength(txt, font=tf)
-        d.text((W - M - 34 - tw, y + 40), txt, font=tf, fill=col)
-        dtxt = f"{'+' if delta > 0 else ''}{delta:.1f}"
+        right = W - M - 36
+        txt = f"{p['projected_now']:.1f} \u2192 {p['actual']}"
+        tf = font('mono', 33, 600)
+        d.text((right - d.textlength(txt, font=tf), y + int(row_h * 0.26)),
+               txt, font=tf, fill=col)
+        dtxt = f"{'+' if delta > 0 else '\u2212'}{abs(delta):.1f}"
         df = font('mono', 22, 600)
-        dw = d.textlength(dtxt, font=df)
-        d.text((W - M - 34 - dw, y + 78), dtxt, font=df, fill=col)
-        y += 112 + 18
+        d.text((right - d.textlength(dtxt, font=df), y + int(row_h * 0.63)),
+               dtxt, font=df, fill=col)
+        y += row_h + row_gap
 
     # ---- footer
-    fy = H - 116
-    d.line([(M, fy - 26), (W - M, fy - 26)], fill=(66, 24, 78), width=2)
+    d.line([(M, footer_rule), (W - M, footer_rule)], fill=(66, 24, 78), width=2)
+    fy = footer_rule + 34
     mono_caps(d, (M, fy), 'python · linear programming · aws lambda', 19, LAVD, 4)
     mono_caps(d, (M, fy + 38), 'predictions published before kickoff', 19, MINT, 4)
     return img
