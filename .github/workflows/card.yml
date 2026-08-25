@@ -1,0 +1,50 @@
+name: Share card
+
+# Renders docs/cards/gw{n}.png from data/season.json.
+# Manual only — run it after a gameweek has settled and you want to post.
+
+on:
+  workflow_dispatch:
+    inputs:
+      gw:
+        description: 'Gameweek number (leave blank for the latest scored one)'
+        required: false
+        default: ''
+
+jobs:
+  card:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - run: pip install --quiet pillow
+
+      - name: Render
+        env:
+          GW: ${{ inputs.gw }}
+        run: |
+          if [ -n "$GW" ]; then
+            python make_card.py --gw "$GW"
+          else
+            python make_card.py
+          fi
+          ls -la docs/cards/
+
+      - name: Commit
+        run: |
+          git config user.name  "fpl-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/cards fonts 2>/dev/null || git add docs/cards
+          if git diff --staged --quiet; then
+            echo "Card unchanged."
+          else
+            git commit -m "share card: latest gameweek"
+            git push
+          fi
