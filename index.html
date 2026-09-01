@@ -167,14 +167,19 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .pcard.toplay{border-style:dashed;opacity:.85}
 .pcard.toplay .scores .pj{color:var(--lav)}
 
-.badge{
+.badges{
   position:absolute;top:-8px;left:50%;transform:translateX(-50%);
+  display:flex;gap:3px;white-space:nowrap;
+}
+.badge{
   font-family:var(--mono);font-size:8px;font-weight:600;letter-spacing:.1em;
   padding:2px 7px;border-radius:999px;background:var(--mint);color:#04120A;white-space:nowrap;
 }
 .badge.v{background:var(--amber);color:#1A1200}
 .badge.on{background:rgba(0,255,135,.18);color:var(--mint);border:1px solid rgba(0,255,135,.45)}
 .badge.off{background:rgba(255,93,122,.15);color:var(--rose);border:1px solid rgba(255,93,122,.4)}
+.badges .badge{padding:2px 6px}
+.badges .badge+.badge{padding:2px 5px}
 
 .tolabel{font-family:var(--mono);font-size:8px;letter-spacing:.12em;
   text-transform:uppercase;color:var(--lavd);margin-top:8px}
@@ -357,8 +362,8 @@ svg{display:block;width:100%;height:auto;overflow:visible}
    views, dwell time and scroll depth are sent explicitly.
    ========================================================================= */
 const ANALYTICS = {
-  ga4:        'G-CZ9ZSRFFFJ',   // 'G-XXXXXXXXXX'      Google Analytics 4
-  clarity:    'y7gd4gcp8g',   // 'abcdefghij'        Microsoft Clarity
+  ga4:        '',   // 'G-XXXXXXXXXX'      Google Analytics 4
+  clarity:    '',   // 'abcdefghij'        Microsoft Clarity
   cfBeacon:   '',   // '{token}'           Cloudflare Web Analytics
 };
 
@@ -729,6 +734,11 @@ function guide(g, scored){
       <div><span class="t">CAPT · VICE</span>
         <span>The captain's points count double. The vice-captain takes over if the
           captain doesn't play.</span></div>
+      <div><span class="t">SUBBED · CAME ON</span>
+        <span>The player didn't feature, so FPL swapped a substitute in
+          automatically. That's FPL's decision, not the model's, so the card stays
+          where the bot put it. Shortened to OUT and ON when a card already carries
+          an armband.</span></div>
     </div>`;
   body.appendChild(right);
   d.appendChild(body);
@@ -813,10 +823,22 @@ function card(p,g,scored,scale){
   if(isCap) c.classList.add('capt');
   else if(isVice) c.classList.add('vice');
 
-  if(isCap) c.appendChild(el('span','badge','CAPT'));
-  else if(isVice) c.appendChild(el('span','badge v','VICE'));
-  else if(scored && p.role==='bench' && p.multiplier>0) c.appendChild(el('span','badge on','CAME ON'));
-  else if(scored && p.role==='xi' && p.multiplier===0) c.appendChild(el('span','badge off','SUBBED'));
+  // Role and substitution are independent facts — a vice-captain can also be
+  // auto-subbed out, and an if/else chain silently dropped the second badge.
+  const tags=[];
+  if(isCap) tags.push(['badge','CAPT','Captain — points doubled']);
+  else if(isVice) tags.push(['badge v','VICE','Vice-captain — takes over if the captain does not play']);
+  if(scored && p.role==='bench' && p.multiplier>0)
+    tags.push(['badge on', tags.length?'ON':'CAME ON','Auto-substituted on by FPL']);
+  else if(scored && p.role==='xi' && p.multiplier===0)
+    tags.push(['badge off', tags.length?'OUT':'SUBBED','Did not play — auto-substituted out by FPL']);
+  if(tags.length){
+    const row=el('div','badges');
+    tags.forEach(([cls,txt,tip])=>{
+      const b=el('span',cls,txt); b.title=tip; row.appendChild(b);
+    });
+    c.appendChild(row);
+  }
 
   c.appendChild(el('div','nm',esc(p.name)));
   c.appendChild(el('div','tm',esc(p.team||'')));
