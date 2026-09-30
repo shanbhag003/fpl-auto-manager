@@ -9,7 +9,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import fpl_bot_hybrid as bot     # noqa: E402  (constants and coefficients, not the network code)
 
 
-def bot_formula(f, use_xp=False, parts=False, ramp=None, fixture_scale=None):
+def bot_formula(f, use_xp=False, parts=False, ramp=None, fixture_scale=None,
+                sp_by_matches=False):
     """The live bot's estimate_base_points + score_now, rebuilt from the table.
 
     Faithful except for three inputs with no history: pre-season friendlies
@@ -47,7 +48,15 @@ def bot_formula(f, use_xp=False, parts=False, ramp=None, fixture_scale=None):
     sp_last = (prev_starts.fillna(0) / bot.FULL_SEASON_STARTS).clip(bot.MIN_START_PROB, 1)
     sp_prior = (w_snap * sp_last + (1 - w_snap) * bot.UNPROVEN_START_PROB).where(
         have, bot.UNPROVEN_START_PROB)
-    start_prob = w_now * sp_now + (1 - w_now) * sp_prior
+    # The live bot weights this season's start rate by the player's OWN minutes,
+    # so a player who stops playing never moves off last season's rate.
+    # sp_by_matches weights it by how many matches his team has played instead.
+    if sp_by_matches:
+        w_sp = (f['cum_n_fix'] / (bot.MIN_MINUTES_FOR_HISTORY / 90)).clip(0, 1)
+        sp_now = (f['cum_started'] / f['cum_n_fix'].replace(0, np.nan)).fillna(0)
+        start_prob = w_sp * sp_now + (1 - w_sp) * sp_prior
+    else:
+        start_prob = w_now * sp_now + (1 - w_now) * sp_prior
 
     # recent starts, weighted 0.5/0.3/0.2 and shrunk toward start_prob
     recent_num = recent_den = 0
@@ -70,6 +79,7 @@ def bot_formula(f, use_xp=False, parts=False, ramp=None, fixture_scale=None):
     # ep_next already covers every fixture in the week; the history estimate is per fixture
     if parts:     # the formula's pieces, as features for the learned model
         return pd.DataFrame({'bot_quality': quality, 'bot_start_prob': sp_recent,
+                             'bot_start_prob_season': start_prob,
                              'bot_mult': mult, 'bot_pred': hist_now * f['n_fix'] * mult})
     return w_ep * f['xP'] + (1 - w_ep) * hist_now * f['n_fix'] * mult
 
