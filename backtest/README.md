@@ -7,6 +7,7 @@ deadline, to measure the player model and tune its constants.
 pip install pandas numpy lightgbm
 python backtest/run.py     # bot formula vs a learned model
 python backtest/tune.py    # sweep the formula's hand-set constants
+python backtest/simulate.py  # play whole seasons with the bot's own decision code
 ```
 
 Data comes from [vaastav/Fantasy-Premier-League](https://github.com/vaastav/Fantasy-Premier-League)
@@ -47,8 +48,46 @@ fixture-difficulty scale (0–0.35; currently 0.15) moves the metrics by less
 than the week-to-week noise. Removing fixture difficulty altogether is clearly
 worse (top-10 falls to 4.02).
 
+## Season simulator (`simulate.py`)
+
+It plays 2023-24 to 2025-26 using the live bot's own functions:
+`build_suggested_squad` at GW1, then `optimise_transfers` (or the old chained
+planner), `pick_starting_xi` and its captain choice, fed with the backtest's
+projections. Results are scored as FPL scores them: auto-subs, vice-captain
+cover, selling prices at half the profit, the five-transfer bank and −4 hits.
+
+It can't see FPL's injury and status flags, so totals run low. Compare
+settings with each other, not with real managers.
+
+Total points over the three seasons:
+
+| Setup | Total | Per season |
+|---|---|---|
+| Old planner, live model (what ran GW1–5 of 2026-27) | 4,334 | 1,445 |
+| Transfer optimiser, live model (PR #3) | 5,295 | 1,765 |
+| Old planner + start-probability fix | 6,110 | 2,037 |
+| **Transfer optimiser + start-probability fix** | **6,703** | **2,234** |
+
+**The start-probability fix.** The live model's season start rate was
+`starts / 34`, weighted by the player's own minutes:
+
+- At GW10 an ever-present starter read as a 29% starter, below a bench
+  player still carrying last season's rate.
+- A player who stopped playing never moved off last season's rate, because his
+  minutes stopped growing. In the 2024-25 replay the top "players to own" in
+  GW10 included three who had left the league.
+
+It's now starts per fixture the player was part of, weighted by the number of
+those fixtures. On predictions alone: MAE 1.39 → 1.08, top-10 per position
+4.16 → 4.24, captain 7.74 → 7.83.
+
+**The optimiser's constants don't matter much.** With the fix in place,
+sweeping `FT_ROLL_VALUE` (0.5–4), `HIT_MARGIN` (0–4, or no hits),
+`MAX_HITS_PER_GW` (0–2) and `BENCH_WEIGHT` (0–0.3) gave 6,639–6,860 in
+total, with no consistent direction. That's path-dependent noise, so the live
+values (2.0, 2.0, 1, 0.1) stay.
+
 ## Not covered yet
 
-The decision layer: transfers, hits, the bench and chips over a whole season.
-That needs a season simulator, and it's what `FT_ROLL_VALUE`, `HIT_MARGIN` and
-`BENCH_WEIGHT` should be tuned against.
+Chips, which the bot doesn't play, and FPL's live projection (`ep_next`),
+which this archive can't supply honestly.

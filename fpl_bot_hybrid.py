@@ -589,6 +589,43 @@ def _quality_from_rates(p90, xgi90, ict90):
             + QUALITY_W_ICT90 * ict90)
 
 
+_LIVE_CACHE = {}
+
+
+def live_gameweek(gw):
+    """A finished gameweek's live data, fetched once per run."""
+    if gw not in _LIVE_CACHE:
+        _LIVE_CACHE[gw] = get(f'https://fantasy.premierleague.com/api/event/{gw}/live/')
+    return _LIVE_CACHE[gw]
+
+
+def season_fixture_counts(gameweek):
+    """Fixtures each player has been part of this season, before `gameweek`.
+
+    This is the denominator for a season start rate. It counts only
+    gameweeks in which the player was in the game, so a mid-season signing
+    isn't marked as benched for matches before he arrived. A double gameweek
+    counts twice.
+
+    Returns {player_id: count}, or {} if any gameweek is unavailable, in
+    which case the caller falls back to gameweek - 1.
+    """
+    counts = {}
+    for gw in range(1, gameweek):
+        try:
+            data = live_gameweek(gw)
+        except Exception as e:
+            print(f"[starts] GW{gw} live data failed ({type(e).__name__}); "
+                  "using gameweek - 1 as the match count")
+            return {}
+        if not data or 'elements' not in data:
+            return {}
+        for e in data['elements']:
+            pid = int(e['id'])
+            counts[pid] = counts.get(pid, 0) + len(e.get('explain') or [])
+    return counts
+
+
 def recent_start_rates(gameweek, weights=None):
     """Weighted recent start rate per player, from the live endpoints.
 
@@ -613,7 +650,7 @@ def recent_start_rates(gameweek, weights=None):
         # raises; an outage here must not take the whole gameweek down, so the
         # caller falls back to the blended probability instead.
         try:
-            data = get(f'https://fantasy.premierleague.com/api/event/{gw}/live/')
+            data = live_gameweek(gw)
         except Exception as e:
             print(f"[recent] GW{gw} live data failed ({type(e).__name__}); skipping it")
             continue
@@ -703,7 +740,25 @@ def estimate_base_points(players_df, gameweek):
     quality = quality * boost.where(~have_snap, 1.0)
 
     # --- start probability, from whichever season has more evidence
-    start_prob_now = (starts / FULL_SEASON_STARTS).clip(MIN_START_PROB, 1.0)
+    #
+    # This season's rate is starts per match the player could have started,
+    # weighted by how many matches that is. It used to be starts / 34 (a
+    # full season) weighted by the player's OWN minutes, which had two
+    # faults, both measured in backtest/:
+    #   - at GW10 an ever-present starter read as a 29% starter, below a
+    #     bench player still riding last season's rate;
+    #   - a player who stopped playing never moved off last season's rate,
+    #     because his minutes stopped growing.
+    # Replaying 2023-24 to 2025-26 with the transfer optimiser, the fix was
+    # worth ~470 points a season (less live, where status flags already
+    # catch players who have left).
+    counts = season_fixture_counts(gameweek) if gameweek > 1 else {}
+    if counts:
+        matches = df['id'].map(counts).fillna(0.0)
+    else:
+        matches = pd.Series(float(max(0, gameweek - 1)), index=df.index)
+    start_prob_now = (starts / matches.replace(0, np.nan)).fillna(0.0).clip(0.0, 1.0)
+    w_starts = (matches / (MIN_MINUTES_FOR_HISTORY / 90)).clip(0, 1)
     start_prob_last = (snap_starts / FULL_SEASON_STARTS).clip(MIN_START_PROB, 1.0)
 
     # Players with no PL history fall back to pre-season evidence where we have
@@ -719,7 +774,7 @@ def estimate_base_points(players_df, gameweek):
 
     start_prob_prior = (w_snap * start_prob_last + (1 - w_snap) * unproven_prior)
     start_prob_prior = start_prob_prior.where(have_snap, unproven_prior)
-    start_prob = w_now * start_prob_now + (1 - w_now) * start_prob_prior
+    start_prob = w_starts * start_prob_now + (1 - w_starts) * start_prob_prior
 
     # --- availability, from FPL's own stated percentage
     #
