@@ -3603,7 +3603,16 @@ def apply_minutes_risk(players_df, risks):
     if not risks:
         return players_df
     df = players_df.copy()
-    factor = df['id'].map(lambda i: 1.0 - risks.get(int(i), {}).get('risk', 0.0))
+    # FPL's chance_of_playing is already in base_points. News about the same
+    # injury would count it twice (75% x 50% = 37.5%), so availability becomes
+    # the LOWER of the two estimates instead: only the part of the news risk
+    # that goes beyond FPL's flag is applied here.
+    chance = pd.to_numeric(df.get('chance_of_playing_next_round'), errors='coerce')
+    if 'chance_of_playing_this_round' in df.columns:
+        chance = chance.fillna(pd.to_numeric(df['chance_of_playing_this_round'], errors='coerce'))
+    chance = (chance / 100.0).clip(0.0, 1.0).fillna(1.0)
+    news_avail = df['id'].map(lambda i: 1.0 - risks.get(int(i), {}).get('risk', 0.0))
+    factor = (news_avail / chance.where(chance > 0, 1.0)).clip(upper=1.0)
     df['base_points'] = df['base_points'] * factor
     if 'base_points_now' in df.columns:
         df['base_points_now'] = df['base_points_now'] * factor
