@@ -19,10 +19,13 @@ MIN_TRANSFER_GAIN = 1.5        # minimum projected-points gain (per gameweek) to
                                # cancel out — 1.5 means 1.5 pts of extra goals/assists/clean sheets.
                                # For scale: best realistic swap from a good squad gains ~3.5.
 TOP_N_CANDIDATES = 3           # shortlist size before any randomness
-TRANSFER_OUT_ATTEMPTS = 4      # outgoing players to try before abandoning a swap
+TRANSFER_OUT_ATTEMPTS = 1      # choose_transfer is now exhaustive; one pass suffices
 SSM_PARAM_NAME = "/fpl-bot/last-processed-gameweek"
 UNAVAILABLE_STATUSES = {'i', 's', 'u', 'n'}          # injured / suspended / unavailable / not in squad
-STATUS_PENALTY = {'a': 0, 'd': -3, 'i': -50, 's': -50, 'u': -50, 'n': -50}
+# 'd' (doubtful) carries no flat penalty any more: every doubtful player has
+# a chance_of_playing value, and scaling start probability by it is both
+# proportional and measured. Keeping the -3 as well would double-count.
+STATUS_PENALTY = {'a': 0, 'd': 0, 'i': -50, 's': -50, 'u': -50, 'n': -50}
 STATUS_LABELS = {'a': 'Available', 'd': 'Doubtful', 'i': 'Injured', 's': 'Suspended',
                   'u': 'Unavailable', 'n': 'Not in squad'}
 
@@ -226,6 +229,17 @@ SNAPSHOT_MIN_MINUTES = 300        # below this, last season's rates are noise; u
 MIN_MINUTES_FOR_HISTORY = 900     # below this, lean on the price fallback
 FULL_SEASON_STARTS = 34           # starts implying a nailed-on starter
 MIN_START_PROB = 0.25             # floor, so a bit-part player isn't zeroed
+USE_CHANCE_OF_PLAYING = True      # scale start probability by FPL's stated %
+CHANCE_MIN_MULTIPLIER = 0.0       # a 0% player is scored at zero, not floored
+
+# --- recent selection, for the lineup decision only -------------------------
+# Season totals cannot tell "benched the last two" from "benched the first two",
+# and start_prob is blended by minutes/900, so three gameweeks in it is still
+# ~90% last season. A defender who has lost his place therefore keeps starting.
+RECENT_FORM_GAMEWEEKS = 3         # how many recent gameweeks to read
+RECENT_START_WEIGHTS = [0.5, 0.3, 0.2]   # most recent first
+RECENT_PRIOR_MATCHES = 1.5        # shrinkage: pseudo-matches of the season prior
+USE_RECENT_STARTS = True          # False reverts score_now to the blended prob
 UNPROVEN_START_PROB = 0.65        # prior for players with no PL history
 EP_NEXT_TRUST_GAMEWEEK = 6        # gameweek by which ep_next reaches its full weight
 EP_NEXT_MAX_WEIGHT = 0.5          # ...and that full weight is half, never all of it
@@ -575,6 +589,47 @@ def _quality_from_rates(p90, xgi90, ict90):
             + QUALITY_W_ICT90 * ict90)
 
 
+def recent_start_rates(gameweek, weights=None):
+    """Weighted recent start rate per player, from the live endpoints.
+
+    One call per recent gameweek returns minutes for EVERY player, so three
+    calls cover the whole league — not one call per player.
+
+    A start is 60+ minutes. That distinguishes a genuine starter from a
+    substitute who came on late, which raw minutes does not.
+
+    Returns {player_id: rate in 0..1}, or {} if the data is unavailable, in
+    which case the caller falls back to the blended probability.
+    """
+    weights = weights or RECENT_START_WEIGHTS
+    gws = [g for g in range(gameweek - 1, gameweek - 1 - RECENT_FORM_GAMEWEEKS, -1)
+           if g >= 1]
+    if not gws:
+        return {}
+
+    num, den = {}, {}
+    for w, gw in zip(weights, gws):
+        # This is an enhancement, not a dependency. `get` retries and then
+        # raises; an outage here must not take the whole gameweek down, so the
+        # caller falls back to the blended probability instead.
+        try:
+            data = get(f'https://fantasy.premierleague.com/api/event/{gw}/live/')
+        except Exception as e:
+            print(f"[recent] GW{gw} live data failed ({type(e).__name__}); skipping it")
+            continue
+        if not data or 'elements' not in data:
+            print(f"[recent] GW{gw} live data unavailable; skipping it")
+            continue
+        for e in data['elements']:
+            pid = int(e['id'])
+            mins = int((e.get('stats') or {}).get('minutes', 0))
+            num[pid] = num.get(pid, 0.0) + w * (1.0 if mins >= 60 else 0.0)
+            den[pid] = den.get(pid, 0.0) + w
+    if not den:
+        return {}
+    return {pid: num[pid] / den[pid] for pid in den if den[pid] > 0}
+
+
 def estimate_base_points(players_df, gameweek):
     """Expected points per fixture for every player.
 
@@ -666,7 +721,70 @@ def estimate_base_points(players_df, gameweek):
     start_prob_prior = start_prob_prior.where(have_snap, unproven_prior)
     start_prob = w_now * start_prob_now + (1 - w_now) * start_prob_prior
 
+    # --- availability, from FPL's own stated percentage
+    #
+    # FPL publishes chance_of_playing_next_round as 0/25/50/75/100, or null when
+    # there is no news. Until now the bot read only `status`, which is coarse:
+    # a 25%-chance player and a fully fit one scored identically unless the flag
+    # was a hard injury. This scales start probability by the stated chance, so
+    # doubt costs points in proportion to the doubt.
+    #
+    # `next_round` is the right column for an upcoming deadline. `this_round` is
+    # the fallback for the window where FPL has published one but not the other.
+    # Null means no news, which means fully available — not unknown.
+    avail = pd.Series(1.0, index=df.index)
+    if USE_CHANCE_OF_PLAYING:
+        chance = pd.to_numeric(df.get('chance_of_playing_next_round'),
+                               errors='coerce')
+        if 'chance_of_playing_this_round' in df.columns:
+            chance = chance.fillna(pd.to_numeric(
+                df['chance_of_playing_this_round'], errors='coerce'))
+        avail = (chance / 100.0).clip(CHANCE_MIN_MULTIPLIER, 1.0).fillna(1.0)
+        n_flagged = int((avail < 1.0).sum())
+        if n_flagged:
+            print(f"[availability] {n_flagged} player(s) scaled by FPL's stated "
+                  f"chance of playing; lowest {avail.min():.0%}")
+
+    # --- a second, recency-dominated start probability, for score_now only
+    #
+    # Who to OWN over five gameweeks is a question last season can help with.
+    # Who STARTS on Saturday is mostly answered by the last three team sheets.
+    # The blended figure is right for the first and wrong for the second: three
+    # gameweeks in, minutes/900 still leaves it ~90% last season, so a defender
+    # who has lost his place keeps getting picked ahead of the man who replaced
+    # him.
+    #
+    # Shrunk toward the season figure so one rotated week does not write a
+    # regular off, and one cameo does not promote a reserve.
+    #
+    # Availability is deliberately applied AFTER this, once, to both views. An
+    # earlier revision scaled start_prob by `avail` first and then scaled the
+    # recency view by it again, double-counting the doubt.
+    start_prob_recent = start_prob
+    if USE_RECENT_STARTS:
+      try:
+        recent = df['id'].map(recent_start_rates(gameweek))
+        seen = recent.notna()
+        if seen.any():
+            k = RECENT_PRIOR_MATCHES
+            n = float(sum(RECENT_START_WEIGHTS[:RECENT_FORM_GAMEWEEKS]))
+            shrunk = (recent * n + start_prob * k) / (n + k)
+            start_prob_recent = shrunk.where(seen, start_prob).clip(0.0, 1.0)
+            moved = (start_prob_recent - start_prob).abs() > 0.12
+            print(f"[recent] {int(seen.sum())} players with recent minutes; "
+                  f"{int(moved.sum())} shifted more than 12pp for the lineup")
+        else:
+            print("[recent] no recent live data; lineup uses the blended figure")
+      except Exception as e:
+        print(f"[recent] disabled this run ({type(e).__name__}: {e}); "
+              "lineup uses the blended figure")
+        start_prob_recent = start_prob
+
+    start_prob = (start_prob * avail).clip(0.0, 1.0)
+    start_prob_now_view = (start_prob_recent * avail).clip(0.0, 1.0)
+
     history_estimate = quality * start_prob
+    history_estimate_now = quality * start_prob_now_view
 
     # --- blend with ep_next once FPL's own projection means something
     #
@@ -683,13 +801,18 @@ def estimate_base_points(players_df, gameweek):
     w = min(EP_NEXT_MAX_WEIGHT,
             max(0.0, (gameweek - 1) / EP_NEXT_TRUST_GAMEWEEK) * EP_NEXT_MAX_WEIGHT)
     base = w * ep_next + (1 - w) * history_estimate
+    # ep_next is left unscaled: FPL's own projection already reflects both
+    # availability and rotation, so scaling it too would double-count.
+    base_now = w * ep_next + (1 - w) * history_estimate_now
 
     n_snap = int(have_snap.sum())
     n_now = int((w_now > 0.5).sum())
     print(f"[scoring] GW{gameweek}: ep_next {w:.0%} / history {1-w:.0%}. "
           f"{n_now} players on this season's data, {n_snap} covered by the "
           f"last-season snapshot.")
-    return base
+    # base drives score_run (who to own); base_now drives score_now
+    # (who starts this week). They differ only in start probability.
+    return base, base_now
 
 
 
@@ -747,6 +870,8 @@ def get_data(bootstrap_data, gameweek):
     players_df['ep_next'] = players_df['ep_next'].astype(float)
 
     teams = dict(zip(teams_df.id, teams_df.name))
+    # Short club codes (ARS, MCI...) for the public front end.
+    TEAM_SHORT.update(dict(zip(teams_df.id.astype(int), teams_df.short_name)))
     players_df['team_name'] = players_df['team'].map(teams)
 
     if fixtures_df.empty:
@@ -775,7 +900,8 @@ def get_data(bootstrap_data, gameweek):
         players_df['diff'] = players_df['diff'].fillna(0)
         players_df['fixture_count'] = players_df['fixture_count'].fillna(0)  # 0 = blank gameweek
 
-    players_df['base_points'] = estimate_base_points(players_df, gameweek)
+    players_df['base_points'], players_df['base_points_now'] = \
+        estimate_base_points(players_df, gameweek)
 
     # Forward-looking fixture term, replacing the old single-gameweek one.
     try:
@@ -821,7 +947,8 @@ def get_data(bootstrap_data, gameweek):
 
     mult_now = (1.0 + players_df['fixture_ease_now'] * FIXTURE_SCALE).clip(0.8, 1.2)
     players_df['score_now'] = (
-        players_df['base_points'] * players_df['fixture_count'] * mult_now + penalty)
+        players_df['base_points_now'] * players_df['fixture_count'] * mult_now
+        + penalty)
 
     mult_run = (1.0 + players_df['fixture_ease'] * FIXTURE_SCALE).clip(0.8, 1.2)
     players_df['score_run'] = (
@@ -2616,9 +2743,10 @@ def plan_transfers(my_team, players_df, bank, free_transfers, made,
         if sellable.empty:
             break
 
-        # pick_out_candidate is weighted-random, so one unlucky draw can land on
-        # a player nobody affordable improves. Try a few before giving up rather
-        # than ending the whole plan on a single miss.
+        # choose_transfer evaluates every sellable player against the best
+        # affordable same-position replacement, so a single pass already
+        # returns the global best swap. The loop is kept for the exclude_out
+        # path and costs one iteration.
         player_out = player_in = None
         gain = 0.0
         tried = set()
@@ -2930,9 +3058,25 @@ def apply_minutes_risk(players_df, risks):
     df = players_df.copy()
     factor = df['id'].map(lambda i: 1.0 - risks.get(int(i), {}).get('risk', 0.0))
     df['base_points'] = df['base_points'] * factor
-    df['score'] = (df['base_points'] * df['fixture_count']
-                   + df['diff'] / 3
-                   + df['status'].map(STATUS_PENALTY).fillna(-50))
+    if 'base_points_now' in df.columns:
+        df['base_points_now'] = df['base_points_now'] * factor
+
+    # Recompute both views with the same formulas get_data uses. The previous
+    # version rebuilt only `score`, with an older `diff / 3` fixture term, so a
+    # flagged player was never actually downgraded in the lineup (which reads
+    # score_now) or in transfer planning (which reads score_run).
+    penalty = df['status'].map(STATUS_PENALTY).fillna(-50)
+    if {'fixture_ease_now', 'fixture_ease', 'avg_fixtures'} <= set(df.columns):
+        mult_now = (1.0 + df['fixture_ease_now'] * FIXTURE_SCALE).clip(0.8, 1.2)
+        mult_run = (1.0 + df['fixture_ease'] * FIXTURE_SCALE).clip(0.8, 1.2)
+        df['score_now'] = (df.get('base_points_now', df['base_points'])
+                           * df['fixture_count'] * mult_now + penalty)
+        df['score_run'] = (df['base_points'] * df['avg_fixtures']
+                           * mult_run + penalty)
+        df['score'] = df['score_run']
+    else:
+        df['score'] = (df['base_points'] * df['fixture_count']
+                       + df['diff'] / 3 + penalty)
     return df
 
 
@@ -2958,6 +3102,376 @@ def format_news_section(risks, players_df, applied):
         lines.append("Nothing was changed because of this. Set LLM_TEAM_NEWS_ENABLED = True")
         lines.append("once you are happy the judgement is sound.")
     return "\n".join(lines)
+
+
+# ===========================================================================
+#  SNAPSHOT LAYER  —  paste this block into fpl_bot_hybrid.py
+#  Put it immediately ABOVE  `def run_bot(...)`.
+#
+#  Everything the front end shows is written from here. The bot's own
+#  behaviour is unchanged: every function below fails soft, because these
+#  calls happen AFTER transfers and lineups are already live on FPL and a
+#  crash here would be far worse than a missing chart.
+# ===========================================================================
+
+SCHEMA_VERSION = 1
+SEASON_LABEL = "2026/27"
+
+def _normalise_repo(value):
+    """Accept a full GitHub URL as well as owner/repo.
+
+    Pasting the browser URL into GITHUB_REPO is the obvious mistake to make,
+    and it fails as a 404 on a path the API has never heard of — which reads
+    like a permissions problem rather than a typo. Worse, a 404 on the READ
+    looks identical to "the file does not exist yet", so the caller would
+    happily rebuild a record that already had data in it.
+    """
+    v = (value or '').strip()
+    for prefix in ('https://github.com/', 'http://github.com/',
+                   'git@github.com:', 'github.com/'):
+        if v.lower().startswith(prefix.lower()):
+            v = v[len(prefix):]
+            break
+    v = v.strip('/')
+    if v.endswith('.git'):
+        v = v[:-4]
+    # Anything beyond owner/repo (…/tree/main, …/blob/…) is not part of the slug.
+    parts = [p for p in v.split('/') if p]
+    return '/'.join(parts[:2])
+
+
+GITHUB_REPO = _normalise_repo(os.environ.get('GITHUB_REPO', ''))        # e.g. shanbhag003/fpl-auto-manager
+GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
+GITHUB_BRANCH = os.environ.get('GITHUB_BRANCH', 'main')
+HUMAN_ENTRY_ID = os.environ.get('HUMAN_ENTRY_ID', '')  # the hand-picked team
+
+GH_API = 'https://api.github.com'
+
+# Where in the repo the snapshot is written. The DRY-RUN build overrides this
+# to data/_dryrun so you can test the GitHub plumbing without touching the
+# files the public page reads.
+SNAPSHOT_PREFIX = 'data'
+
+# Populated by get_data(). Falls back to the full club name if empty.
+TEAM_SHORT = {}
+
+
+# --- GitHub Contents API ----------------------------------------------------
+
+def _gh_headers():
+    return {'Authorization': f'Bearer {GITHUB_TOKEN}',
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28'}
+
+
+def gh_read(path):
+    """Return (parsed_json, sha) for a file in the repo, or (None, None)."""
+    if not (GITHUB_REPO and GITHUB_TOKEN):
+        return None, None
+    url = f'{GH_API}/repos/{GITHUB_REPO}/contents/{path}?ref={GITHUB_BRANCH}'
+    try:
+        r = requests.get(url, headers=_gh_headers(), timeout=20)
+        if r.status_code == 404:
+            return None, None
+        if r.status_code != 200:
+            print(f"[gh] read {path} -> HTTP {r.status_code}")
+            return None, None
+        payload = r.json()
+        raw = base64.b64decode(payload['content'])
+        return json.loads(raw), payload['sha']
+    except Exception as e:
+        print(f"[gh] read {path} failed: {type(e).__name__}: {e}")
+        return None, None
+
+
+def gh_write(path, obj, message, sha=None):
+    """Commit a JSON file. Returns True on success. Never raises."""
+    if not (GITHUB_REPO and GITHUB_TOKEN):
+        print("[gh] GITHUB_REPO / GITHUB_TOKEN not set — snapshot skipped.")
+        return False
+    body = json.dumps(obj, separators=(',', ':'), ensure_ascii=False)
+    payload = {'message': message,
+               'content': base64.b64encode(body.encode('utf-8')).decode('ascii'),
+               'branch': GITHUB_BRANCH}
+    if sha:
+        payload['sha'] = sha
+    url = f'{GH_API}/repos/{GITHUB_REPO}/contents/{path}'
+    try:
+        r = requests.put(url, headers=_gh_headers(), json=payload, timeout=25)
+        if r.status_code in (200, 201):
+            print(f"[gh] wrote {path} ({len(body)} bytes)")
+            return True
+        print(f"[gh] write {path} -> HTTP {r.status_code}: {r.text[:200]!r}")
+    except Exception as e:
+        print(f"[gh] write {path} failed: {type(e).__name__}: {e}")
+    return False
+
+
+# --- serialisers ------------------------------------------------------------
+
+def _pos(et):
+    return {1: 'GK', 2: 'DEF', 3: 'MID', 4: 'FWD'}.get(int(et), '?')
+
+
+def _num(v, nd=2):
+    try:
+        f = float(v)
+        if f != f:          # NaN
+            return None
+        return round(f, nd)
+    except (TypeError, ValueError):
+        return None
+
+
+def _player_record(row, role, bench_order=None, multiplier=1, note=None):
+    tid = int(row['team'])
+    return {
+        'id': int(row['id']),
+        'name': str(row['web_name']),
+        'pos': _pos(row['element_type']),
+        'team': TEAM_SHORT.get(tid) or str(row.get('team_name', '')),
+        'cost': int(row['now_cost']),
+        'role': role,
+        'bench_order': bench_order,
+        'multiplier': multiplier,
+        'projected_now': _num(row.get('score_now', row.get('score'))),
+        'projected_run': _num(row.get('score_run', row.get('score'))),
+        'actual': None,
+        'minutes': None,
+        'note': note,
+    }
+
+
+def snapshot_squad(starters, subs, captain_id, vice_id, players_df=None):
+    """The 15 in submission order: XI first, then bench GK, then outfield subs."""
+    out = []
+    for _, r in starters.sort_values('element_type').iterrows():
+        pid = int(r['id'])
+        mult = 2 if pid == captain_id else 1
+        note = None
+        try:
+            note = describe_player(r)
+        except Exception:
+            pass
+        out.append(_player_record(r, 'xi', None, mult, note))
+
+    bench_gk = subs.loc[subs.element_type == 1]
+    bench_out = subs.loc[subs.element_type != 1].sort_values(
+        'score_now' if 'score_now' in subs.columns else 'score', ascending=False)
+    order = 1
+    for _, r in bench_gk.iterrows():
+        out.append(_player_record(r, 'bench', order, 0))
+        order += 1
+    for _, r in bench_out.iterrows():
+        out.append(_player_record(r, 'bench', order, 0))
+        order += 1
+    return out
+
+
+def snapshot_transfers_from_plan(transfers, hit_cost):
+    """Adapter for plan_transfers() output: (out_df, in_df, gain, was_free)."""
+    recs = []
+    for player_out, player_in, gain, was_free in transfers:
+        o, n = player_out.iloc[0], player_in.iloc[0]
+        reason = ''
+        try:
+            reason = explain_swap(player_out, player_in, gain)
+        except Exception:
+            try:
+                reason = describe_player(n)
+            except Exception:
+                pass
+        recs.append({
+            'out': {'id': int(o['id']), 'name': str(o['web_name']),
+                    'cost': int(o['now_cost']), 'pos': _pos(o['element_type'])},
+            'in': {'id': int(n['id']), 'name': str(n['web_name']),
+                   'cost': int(n['now_cost']), 'pos': _pos(n['element_type'])},
+            'gain': _num(gain),
+            'free': bool(was_free),
+            'hit_cost': 0 if was_free else int(hit_cost),
+            'reason': reason,
+        })
+    return recs
+
+
+def snapshot_transfers_from_rebuild(transfers, players_df):
+    """Adapter for rebuild_squad_unlimited() output: {element_in, element_out}."""
+    lookup = players_df.set_index('id', drop=False)
+    recs = []
+    for t in transfers:
+        try:
+            o = lookup.loc[int(t['element_out'])]
+            n = lookup.loc[int(t['element_in'])]
+        except KeyError:
+            continue
+        reason = ''
+        try:
+            reason = describe_player(n)
+        except Exception:
+            pass
+        recs.append({
+            'out': {'id': int(o['id']), 'name': str(o['web_name']),
+                    'cost': int(o['now_cost']), 'pos': _pos(o['element_type'])},
+            'in': {'id': int(n['id']), 'name': str(n['web_name']),
+                   'cost': int(n['now_cost']), 'pos': _pos(n['element_type'])},
+            'gain': _num(float(n['score']) - float(o['score'])),
+            'free': True,
+            'hit_cost': 0,
+            'reason': reason,
+        })
+    return recs
+
+
+def snapshot_news(news_risks, players_df, applied):
+    if not news_risks:
+        return []
+    lookup = players_df.set_index('id', drop=False)
+    out = []
+    for pid, info in news_risks.items():
+        try:
+            name = str(lookup.loc[int(pid)]['web_name'])
+        except KeyError:
+            continue
+        out.append({'id': int(pid), 'name': name,
+                    'risk': _num(info.get('risk'), 2),
+                    'reason': str(info.get('reason', ''))[:300],
+                    'applied': bool(applied)})
+    return out
+
+
+def _stopping_reason(plan_log):
+    for line in reversed(plan_log or []):
+        if str(line).startswith('Stopping:'):
+            return str(line)[len('Stopping:'):].strip()
+    return None
+
+
+# --- the two writes ---------------------------------------------------------
+
+def write_projections(gameweek, players_df):
+    """Freeze the model's view of EVERY player, before kickoff. Write-once.
+
+    This is what makes the comparison against the hand-picked team honest:
+    that squad's picks aren't public until after the deadline, so its
+    projection has to come from numbers committed before it.
+    """
+    path = f'{SNAPSHOT_PREFIX}/projections/gw{gameweek}.json'
+    existing, _sha = gh_read(path)
+    if existing is not None:
+        print(f"[snapshot] projections for GW{gameweek} already frozen — not rewriting.")
+        return
+
+    scores = {}
+    for r in players_df.itertuples():
+        now = _num(getattr(r, 'score_now', None))
+        run = _num(getattr(r, 'score_run', None))
+        if now is None and run is None:
+            continue
+        scores[str(int(r.id))] = [now, run]
+
+    gh_write(path,
+             {'gw': int(gameweek),
+              'written_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+              'scores': scores},
+             f'GW{gameweek}: freeze projections for {len(scores)} players')
+
+
+def emit_snapshot(gameweek, players_df, squad, starters, subs,
+                  captain_row, vice_row, transfers, plan_log,
+                  news_risks, automated, bank, chips, team_id):
+    """Write this gameweek's decision to data/season.json.
+
+    Called after submission. Fails soft — a GitHub outage must never turn a
+    successful gameweek into an error email.
+    """
+    try:
+        write_projections(gameweek, players_df)
+
+        captain_id = int(captain_row['id'])
+        vice_id = int(vice_row['id'])
+        squad_json = snapshot_squad(starters, subs, captain_id, vice_id, players_df)
+
+        score_col = 'score_now' if 'score_now' in starters.columns else 'score'
+        xi_total = float(starters[score_col].sum())
+        cap_bonus = float(captain_row[score_col])
+
+        shape = starters['element_type'].value_counts()
+        formation = f"{int(shape.get(2,0))}-{int(shape.get(3,0))}-{int(shape.get(4,0))}"
+
+        record = {
+            'gw': int(gameweek),
+            'deadline': None,
+            'decided_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+            'status': 'projected',
+            'instrumented': True,
+            'mode': 'automated' if automated else 'advisory',
+            'bot': {
+                'squad': squad_json,
+                'captain': captain_id,
+                'vice': vice_id,
+                'formation': formation,
+                'bank': int(bank or 0),
+                'value': int(squad['now_cost'].sum()),
+                'projected': {'xi': round(xi_total, 2),
+                              'captain_bonus': round(cap_bonus, 2),
+                              'total': round(xi_total + cap_bonus, 2)},
+                'actual': {'total': None, 'bench': None, 'hits': 0,
+                           'gw_rank': None, 'overall_rank': None},
+            },
+            'human': {
+                'squad': [], 'captain': None,
+                'projected': {'xi': None, 'captain_bonus': None, 'total': None},
+                'actual': {'total': None, 'bench': None, 'hits': None,
+                           'gw_rank': None, 'overall_rank': None},
+            },
+            'transfers': transfers or [],
+            'no_transfer_reason': (None if transfers else _stopping_reason(plan_log)),
+            'news': snapshot_news(news_risks, players_df, LLM_TEAM_NEWS_ENABLED),
+            'chips_flagged': [{'name': c[0], 'reason': c[2]}
+                              for c in (chips or []) if c[1]],
+        }
+
+        season, sha = gh_read(f'{SNAPSHOT_PREFIX}/season.json')
+        if season is None:
+            season = {
+                'schema_version': SCHEMA_VERSION,
+                'season': SEASON_LABEL,
+                'generated_at': None,
+                'instrumented_from_gw': int(gameweek),
+                'entries': {
+                    'bot': {'id': int(team_id), 'name': '', 'manager': ''},
+                    'human': {'id': int(HUMAN_ENTRY_ID or 0), 'name': '', 'manager': ''},
+                },
+                'totals': {'bot': {'points': 0, 'overall_rank': None},
+                           'human': {'points': 0, 'overall_rank': None}},
+                'gameweeks': [],
+            }
+
+        # Preserve any actuals a results pass already filled in.
+        gws = [g for g in season.get('gameweeks', []) if int(g.get('gw')) != int(gameweek)]
+        prior = next((g for g in season.get('gameweeks', [])
+                      if int(g.get('gw')) == int(gameweek)), None)
+        if prior and prior.get('status') == 'final':
+            print(f"[snapshot] GW{gameweek} is already final — leaving it alone.")
+            return
+        gws.append(record)
+        gws.sort(key=lambda g: int(g['gw']))
+        season['gameweeks'] = gws
+        season['generated_at'] = record['decided_at']
+        season.setdefault('entries', {})['bot'] = {
+            'id': int(team_id),
+            'name': season.get('entries', {}).get('bot', {}).get('name', ''),
+            'manager': season.get('entries', {}).get('bot', {}).get('manager', ''),
+        }
+
+        gh_write(f'{SNAPSHOT_PREFIX}/season.json', season,
+                 f'GW{gameweek}: {len(record["transfers"])} transfer(s), '
+                 f'projected {record["bot"]["projected"]["total"]:.1f}', sha)
+
+    except Exception as e:
+        print(f"[snapshot] failed ({type(e).__name__}: {e}) — the FPL side is "
+              "unaffected. Front end will be one gameweek stale.")
+        traceback.print_exc()
 
 
 def run_bot(team_id, test_mode=False):
@@ -3138,6 +3652,13 @@ def run_bot(team_id, test_mode=False):
             *(lambda hi, rk, tp: (hi, int(squad['now_cost'].sum()), rk, tp))(
                 *fetch_entry_summary(team_id)))
 
+        # --- publish this decision to the front end (fails soft) ---
+        emit_snapshot(
+            gameweek, players_df, squad, starters, subs, captain_row, vice_row,
+            snapshot_transfers_from_rebuild(transfers, players_df), [],
+            news_risks, automated, bank,
+            evaluate_chips(squad, subs, captain_row), team_id)
+
         if test_mode:
             print("\nTEST MODE — nothing submitted, no email, nothing saved.")
             return
@@ -3279,6 +3800,14 @@ def run_bot(team_id, test_mode=False):
         *(lambda hi, rk, tp: (hi, int(squad['now_cost'].sum()), rk, tp))(
             *fetch_entry_summary(team_id)))
 
+    # --- publish this decision to the front end (fails soft) ---
+    emit_snapshot(
+        gameweek, players_df, squad, starters, subs, captain_row, vice_row,
+        snapshot_transfers_from_plan(_transfers, hit_cost),
+        locals().get('plan_log') or [],
+        news_risks, automated, bank,
+        evaluate_chips(squad, subs, captain_row), team_id)
+
     if test_mode:
         print("\nTEST MODE — nothing submitted, no email, nothing saved.")
         return
@@ -3294,6 +3823,21 @@ def run_bot(team_id, test_mode=False):
 def choose_transfer(my_team, players_df, bank, selling_prices=None,
                     full_squad=None, exclude_out=None):
     """Pick the out/in pair and the projected gain. Returns (out, in, gain).
+
+    Searches EVERY sellable player against the best affordable replacement in
+    the same position, and returns the pair with the largest gain.
+
+    The previous version drew the outgoing player from
+    `my_team.sort_values('score').head(TOP_N_CANDIDATES)` — the three lowest
+    scores in the squad, position-agnostic. Goalkeepers score fewest points by
+    construction, so the bottom three were permanently both keepers plus the
+    cheapest defender. Since the incoming budget is `bank + sale value`,
+    selling a 4.0m keeper funds only another 4.0m keeper, and no such swap can
+    clear MIN_TRANSFER_GAIN. Midfielders and forwards — where the calibration
+    in HOW_IT_WORKS.md measured gains of +2.70 and +3.52 — were never
+    reachable as outgoing candidates at all. The result was a bot that
+    correctly reported "no swap clears the bar" while never looking at the
+    swaps that would have.
 
     my_team      players that may be SOLD
     full_squad   everything currently owned, for club limits and the
@@ -3312,29 +3856,46 @@ def choose_transfer(my_team, players_df, bank, selling_prices=None,
     if sellable.empty:
         return None, None, 0.0
 
-    player_out = pick_out_candidate(sellable)
-    out_id = int(player_out.id.iat[0])
-    sale_value = selling_prices.get(out_id, int(player_out.now_cost.iat[0]))
-    budget = (bank or 0) + sale_value
-
-    # Club limits and "do I already own him" must be judged against the WHOLE
-    # squad, not just the players available to sell.
     club_counts = owned['team'].value_counts()
-    full_clubs = [c for c, n in club_counts.items()
-                  if n >= 3 and c != player_out.team.iat[0]]
+    owned_ids = set(owned['id'].astype(int))
 
-    pool = players_df[
-        (players_df['element_type'] == player_out.element_type.iat[0])
-        & (players_df['now_cost'] <= budget)
-        & (~players_df['team'].isin(full_clubs))
-        & (players_df['status'] == 'a')
-        & (~players_df['id'].isin(owned['id']))
-    ]
+    best_out = best_in = None
+    best_gain = float('-inf')
+    fallback_out = None
 
-    player_in = pick_in_candidate(pool)
-    if player_in is None:
-        return player_out, None, 0.0
-    return player_out, player_in, player_in.score.iat[0] - player_out.score.iat[0]
+    for out_idx, cand in sellable.iterrows():
+        out_id = int(cand['id'])
+        sale_value = selling_prices.get(out_id, int(cand['now_cost']))
+        budget = (bank or 0) + sale_value
+
+        # Club limits and "do I already own him" are judged against the WHOLE
+        # squad. Selling from a full club frees a slot at that club.
+        full_clubs = [c for c, n in club_counts.items()
+                      if n >= 3 and c != cand['team']]
+
+        pool = players_df[
+            (players_df['element_type'] == cand['element_type'])
+            & (players_df['now_cost'] <= budget)
+            & (~players_df['team'].isin(full_clubs))
+            & (players_df['status'] == 'a')
+            & (~players_df['id'].isin(owned_ids))
+        ]
+        if pool.empty:
+            if fallback_out is None:
+                fallback_out = sellable.loc[[out_idx]]
+            continue
+
+        in_idx = pool['score'].idxmax()
+        gain = float(pool.at[in_idx, 'score']) - float(cand['score'])
+        if gain > best_gain:
+            best_gain = gain
+            best_out = sellable.loc[[out_idx]]
+            best_in = players_df.loc[[in_idx]]
+
+    if best_in is None:
+        # Nothing affordable anywhere; hand back a name so the log can say who.
+        return fallback_out, None, 0.0
+    return best_out, best_in, best_gain
 
 
 # --- Lambda entry point ---

@@ -3,7 +3,9 @@
 # (ap-south-1). Safe to re-run. Prints the role ARN at the end.
 set -euo pipefail
 
-REPO="shanbhag003/fpl-auto-manager"
+# GitHub sends an immutable subject (owner and repo IDs baked in), so a renamed
+# or re-created repo with the same name cannot assume this role.
+SUB_PREFIX="repo:shanbhag003@67545113/fpl-auto-manager@1321217431"
 ROLE="github-fpl-deploy"
 REGION="ap-south-1"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
@@ -25,7 +27,7 @@ cat > /tmp/trust.json <<EOF
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {"StringEquals": {
       "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-      "token.actions.githubusercontent.com:sub": "repo:${REPO}:environment:production"
+      "token.actions.githubusercontent.com:sub": "${SUB_PREFIX}:environment:production"
     }}
   }]
 }
