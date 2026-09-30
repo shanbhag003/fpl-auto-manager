@@ -87,7 +87,44 @@ sweeping `FT_ROLL_VALUE` (0.5–4), `HIT_MARGIN` (0–4, or no hits),
 total, with no consistent direction. That's path-dependent noise, so the live
 values (2.0, 2.0, 1, 0.1) stay.
 
+## Chips (`simulate.play(..., chips=...)`)
+
+This follows the rules as of 2025-26: each chip twice (once in GW1–19, once in
+GW20–38), and one chip per gameweek. Each week the simulator projects what
+every available chip would add:
+
+| Chip | Projected gain |
+|---|---|
+| Triple Captain | one more captain score |
+| Bench Boost | the bench's score |
+| Free Hit | best one-week squad's XI + captain, minus the planned squad's |
+| Wildcard | full rebuild's value over five weeks, minus the transfer plan's |
+
+A chip is played when its gain clears its threshold, taking the biggest margin
+if several do. Near the end of a half, the remaining chips are forced one per
+week so none expires.
+
+| Rule | 3-season total | vs no chips |
+|---|---|---|
+| No chips | 6,703 | — |
+| Play as soon as available | 6,859 | +156 |
+| Forced at the end of each half only | 6,852 | +149 |
+| Thresholds at the top ~50% of weekly gains | 7,052 | +349 |
+| **Top ~25%: TC 9, BB 13.3, FH 6, WC 13.5** | **7,222** | **+519** |
+| Top ~25%, TC 8 / BB 12 variants | 7,181–7,186 | +478–483 |
+| Top ~10% | 6,948 | +245 |
+| Top ~5% | 6,917 | +214 |
+
+Too eager wastes chips on ordinary weeks. Too picky waits for weeks that never
+come, and the chips end up forced at the deadline. The three settings around
+the top 25% land within 41 points of each other, so the optimum is a plateau,
+not a lucky point. Worth about +170 a season.
+
+The thresholds are on the simulator's projection scale. Live projections
+also blend in `ep_next` and FPL's availability flags, so check the live
+gain distribution before trusting them exactly.
+
 ## Not covered yet
 
-Chips, which the bot doesn't play, and FPL's live projection (`ep_next`),
-which this archive can't supply honestly.
+FPL's live projection (`ep_next`), which this archive can't supply honestly,
+and team news.
