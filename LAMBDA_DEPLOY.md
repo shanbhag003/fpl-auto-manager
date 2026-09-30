@@ -21,6 +21,15 @@ stops instead of overwriting it.
 
 ## One-time AWS setup (region ap-south-1)
 
+**Quick way:** open AWS CloudShell in ap-south-1 and run
+
+```
+curl -sSL https://raw.githubusercontent.com/shanbhag003/fpl-auto-manager/main/.github/scripts/aws_setup.sh | bash
+```
+
+It does steps 1–2 below and prints the role ARN for step 3. The manual steps
+are the same thing by hand.
+
 ### 1. Add GitHub as an identity provider
 
 IAM → **Identity providers** → **Add provider**
