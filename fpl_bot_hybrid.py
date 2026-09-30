@@ -2420,7 +2420,7 @@ def post_checked(session, url, label, **kwargs):
     return resp
 
 
-def submit_lineup(session, team_id, starters, subs, captain_id, vice_captain_id):
+def submit_lineup(session, team_id, starters, subs, captain_id, vice_captain_id, chip=None):
     """Submit the XI, bench order, captain and vice-captain.
 
     FPL's position rules are strict:
@@ -2470,7 +2470,8 @@ def submit_lineup(session, team_id, starters, subs, captain_id, vice_captain_id)
         'referer': 'https://fantasy.premierleague.com/my-team',
     }
     post_checked(session, f'https://fantasy.premierleague.com/api/my-team/{team_id}/',
-                 label="Lineup", json={"picks": picks, "chip": None}, headers=headers)
+                 label="Lineup" + (f" + {chip}" if chip else ""),
+                 json={"picks": picks, "chip": chip}, headers=headers)
 
 
 def squad_signature(ids):
@@ -2942,6 +2943,140 @@ def optimise_transfers(my_team, players_df, bank, free_transfers, made,
     return transfers, squad, log
 
 
+# --- Chips -------------------------------------------------------------------
+# Each chip is valid twice a season, once per half (FPL's `chips` list gives
+# the windows). Every week each available chip's gain is projected, and one
+# is played when its gain clears the threshold below. A chip whose window is
+# about to close is played anyway, so none expires unused.
+#
+# Thresholds from backtest/simulate.py, 2023-24 to 2025-26: the top quarter of
+# weekly gains scored +519 over three seasons against no chips, and +370
+# against only using them before they expire. Neighbouring settings were
+# within 41 points.
+AUTO_PLAY_CHIPS = True
+CHIP_THRESHOLDS = {
+    '3xc': 9.0,          # captain's projected score this week
+    'bboost': 13.3,      # the bench's projected score this week
+    'freehit': 6.0,      # one-week squad's XI + captain over the planned squad's
+    'wildcard': 13.5,    # full rebuild over the planned squad, this week + next four
+}
+CHIP_LABELS = {'wildcard': 'Wildcard', 'freehit': 'Free Hit',
+               'bboost': 'Bench Boost', '3xc': 'Triple Captain'}
+
+
+def chip_status(bootstrap_data, team_id, gameweek):
+    """(available, active): chips usable this gameweek and any already played.
+
+    available  {chip name: last gameweek of its window}
+    active     the chip already played this gameweek, or None — a rerun must
+               keep it rather than cancel it by submitting chip=None.
+
+    Built from public data (FPL's chip windows and the entry's history), so it
+    works in advisory mode too.
+    """
+    played = get(f'https://fantasy.premierleague.com/api/entry/{team_id}/history/').get('chips', [])
+    active = next((p['name'] for p in played if p.get('event') == gameweek), None)
+    available = {}
+    for c in bootstrap_data.get('chips', []):
+        start, stop = c.get('start_event', 1), c.get('stop_event', 38)
+        if not start <= gameweek <= stop:
+            continue
+        if any(p['name'] == c['name'] and start <= p.get('event', 0) <= stop for p in played):
+            continue
+        available[c['name']] = stop
+    return available, active
+
+
+def _week_value(squad_df):
+    """This week's projected XI + captain, and bench, from score_now alone."""
+    starters, subs = pick_starting_xi(squad_df)
+    v = starters['score_now'].astype(float)
+    return float(v.sum() + v.max()), float(subs['score_now'].astype(float).sum())
+
+
+def chip_gains(players_df, current_squad, planned_squad, plan_hits, budget, available):
+    """Projected gain of each available chip this week, in points.
+
+    Returns (gains, squads), where squads holds the Wildcard / Free Hit squad
+    that the gain refers to.
+    """
+    xi_val, bench_val = _week_value(planned_squad)
+    starters, _ = pick_starting_xi(planned_squad)
+    gains, squads = {}, {}
+    if '3xc' in available:
+        gains['3xc'] = float(starters['score_now'].max())
+    if 'bboost' in available:
+        gains['bboost'] = bench_val
+    if 'freehit' in available:
+        fh = build_suggested_squad(players_df.assign(score=players_df['score_now']), budget)
+        if fh is not None:
+            squads['freehit'] = players_df[players_df['id'].isin(fh['id'])].copy()
+            gains['freehit'] = _week_value(squads['freehit'])[0] - xi_val
+    if 'wildcard' in available:
+        wc = build_suggested_squad(players_df, budget)
+        if wc is not None:
+            squads['wildcard'] = players_df[players_df['id'].isin(wc['id'])].copy()
+            gains['wildcard'] = (squad_value(squads['wildcard'])
+                                 - (squad_value(planned_squad) - plan_hits * TRANSFER_HIT_COST))
+    return gains, squads
+
+
+def choose_chip(gameweek, gains, available):
+    """The chip to play this week, or None. Returns (chip, reason)."""
+    # Windows closing soonest first: if there are no more weeks left in a
+    # window than chips still unused in it, play the best of them now.
+    for stop in sorted(set(available.values())):
+        in_window = {c: g for c, g in gains.items() if available.get(c) == stop}
+        if in_window and stop - gameweek + 1 <= len(in_window):
+            chip = max(in_window, key=in_window.get)
+            return chip, (f"its window closes in GW{stop} with {len(in_window)} chip(s) "
+                          f"still unused, so it's played now rather than lost")
+    margin = {c: g - CHIP_THRESHOLDS[c] for c, g in gains.items() if g >= CHIP_THRESHOLDS[c]}
+    if not margin:
+        return None, None
+    chip = max(margin, key=margin.get)
+    return chip, (f"projected gain {gains[chip]:.1f} clears the "
+                  f"{CHIP_THRESHOLDS[chip]:.1f} threshold")
+
+
+def chip_rows(gains, chip, reason, available, played):
+    """(label, played, reason) rows for the email and the site, one per chip."""
+    what = {'3xc': "captain projected", 'bboost': "bench projected",
+            'freehit': "one-week squad gains", 'wildcard': "rebuild gains over five weeks"}
+    rows = []
+    for c in ('wildcard', 'freehit', 'bboost', '3xc'):
+        if c == chip:
+            verb = "Played" if played else "Recommended"
+            rows.append((CHIP_LABELS[c], True, f"{verb}: {reason}."))
+        elif c in gains:
+            why_not = (f"clears its {CHIP_THRESHOLDS[c]:.1f} threshold, but only one chip "
+                       f"can be played a week" if chip and gains[c] >= CHIP_THRESHOLDS[c]
+                       else f"plays at {CHIP_THRESHOLDS[c]:.1f}")
+            rows.append((CHIP_LABELS[c], False,
+                         f"{what[c]} {gains[c]:.1f} ({why_not}); "
+                         f"available until GW{available[c]}."))
+        else:
+            rows.append((CHIP_LABELS[c], False, "Not available in this window."))
+    return rows
+
+
+def transfers_between(old_squad, new_squad, players_df):
+    """Wildcard / Free Hit squad change as (out, in, gain, free) tuples,
+    paired within position so FPL accepts each swap."""
+    old_ids, new_ids = set(old_squad['id']), set(new_squad['id'])
+    lookup = players_df.set_index('id', drop=False)
+    pairs = []
+    for p in (1, 2, 3, 4):
+        outs = sorted((i for i in old_ids - new_ids if lookup.at[i, 'element_type'] == p),
+                      key=lambda i: lookup.at[i, 'score'])
+        ins = sorted((i for i in new_ids - old_ids if lookup.at[i, 'element_type'] == p),
+                     key=lambda i: -lookup.at[i, 'score'])
+        for o, n in zip(outs, ins):
+            pairs.append((players_df.loc[players_df.id == o], players_df.loc[players_df.id == n],
+                          float(lookup.at[n, 'score']) - float(lookup.at[o, 'score']), True))
+    return pairs
+
+
 def plan_transfers(my_team, players_df, bank, free_transfers, made,
                    hit_cost, selling_prices=None):
     """Plan this gameweek's transfers.
@@ -3079,8 +3214,10 @@ def format_transfer_plan(transfers, log, hit_cost):
     return "\n".join(lines)
 
 
-def submit_transfers_bulk(session, team_id, gameweek, transfers, selling_prices=None):
-    """Send every planned transfer in a single request."""
+def submit_transfers_bulk(session, team_id, gameweek, transfers, selling_prices=None,
+                          chip=None):
+    """Send every planned transfer in a single request (with a Wildcard or
+    Free Hit when `chip` names one)."""
     selling_prices = selling_prices or {}
     payload_transfers = []
     for player_out, player_in, _gain, _free in transfers:
@@ -3097,10 +3234,10 @@ def submit_transfers_bulk(session, team_id, gameweek, transfers, selling_prices=
         'origin': 'https://fantasy.premierleague.com',
         'referer': 'https://fantasy.premierleague.com/transfers',
     }
-    payload = {"transfers": payload_transfers, "chip": None,
+    payload = {"transfers": payload_transfers, "chip": chip,
                "entry": int(team_id), "event": int(gameweek)}
     post_checked(session, 'https://fantasy.premierleague.com/api/transfers/',
-                 label=f"{len(payload_transfers)} transfer(s)",
+                 label=f"{len(payload_transfers)} transfer(s)" + (f" + {chip}" if chip else ""),
                  data=json.dumps(payload), headers=headers)
 
 
@@ -3757,6 +3894,18 @@ def run_bot(team_id, test_mode=False):
     players_df, fixtures_df = get_data(bootstrap_data, gameweek)
     print(f"Scored {len(players_df)} players for GW{gameweek}.")
 
+    # Chips: which are usable, and whether one is already played this week.
+    # An enhancement: if the lookup fails the gameweek goes ahead without.
+    try:
+        chips_available, active_chip = chip_status(bootstrap_data, team_id, gameweek)
+        print(f"[chips] available: {sorted(chips_available) or 'none'}; "
+              f"active this week: {active_chip or 'none'}")
+    except Exception as e:
+        print(f"[chips] status unavailable ({type(e).__name__}: {e}); no chip this week")
+        chips_available, active_chip = {}, None
+    if not AUTO_PLAY_CHIPS and automated:
+        chips_available = {}
+
     if automated:
         ids = [p['element'] for p in team_data['picks']]
         my_team = players_df[players_df['id'].isin(ids)].copy()
@@ -3843,8 +3992,11 @@ def run_bot(team_id, test_mode=False):
             incoming_section['risks'] = risks
             return adjusted if (risks and LLM_TEAM_NEWS_ENABLED) else None
 
+        # A Free Hit lasts one week, so its squad is built on this week's scores.
+        rebuild_df = (players_df.assign(score=players_df['score_now'])
+                      if active_chip == 'freehit' else players_df)
         transfers, optimal, budget = rebuild_squad_unlimited(
-            session, team_id, gameweek, players_df, team_data, test_mode,
+            session, team_id, gameweek, rebuild_df, team_data, test_mode,
             news_hook=_news_hook)
 
         squad = optimal if optimal is not None else my_team
@@ -3924,6 +4076,8 @@ def run_bot(team_id, test_mode=False):
         # deadline, when real team news is available.
         return
 
+    chip, chip_reason, chip_gain_map = None, None, {}
+
     # --- squad: real one if we have it, otherwise build a suggestion ---
     if my_team is not None and len(my_team) >= 15:
         # Selling prices differ from current prices once a player's value has
@@ -3959,8 +4113,32 @@ def run_bot(team_id, test_mode=False):
             sections.append(in_section)
             sections.append("")
 
+        # --- chips: decided on the planned squad, before anything is sent ---
+        if active_chip:
+            chip, chip_reason = active_chip, "already played this gameweek, so it's kept"
+        elif chips_available and should_update:
+            original_team = players_df[players_df['id'].isin(original_squad_ids)].copy()
+            budget = (bank or 0) + sum(selling_prices.get(int(i), int(c)) for i, c in
+                                       zip(original_team['id'], original_team['now_cost']))
+            planned_hits = sum(1 for t in transfers if not t[3])
+            chip_gain_map, chip_squads = chip_gains(
+                players_df, original_team, my_team, planned_hits, budget, chips_available)
+            chip, chip_reason = choose_chip(gameweek, chip_gain_map, chips_available)
+            print("[chips] projected gains: " + ", ".join(
+                f"{CHIP_LABELS[c]} {g:.1f}" for c, g in chip_gain_map.items()))
+            if chip:
+                print(f"[chips] {CHIP_LABELS[chip]}: {chip_reason}")
+            if chip in ('wildcard', 'freehit'):
+                transfers = transfers_between(original_team, chip_squads[chip], players_df)
+                my_team = chip_squads[chip]
+                plan_log = plan_log + [
+                    f"{CHIP_LABELS[chip]} chosen ({chip_reason}): the transfer plan was "
+                    f"replaced by a full rebuild, {len(transfers)} change(s), no hits."]
+
         if transfers and automated and not test_mode:
-            submit_transfers_bulk(session, team_id, gameweek, transfers, selling_prices)
+            submit_transfers_bulk(
+                session, team_id, gameweek, transfers, selling_prices,
+                chip=chip if chip in ('wildcard', 'freehit') and not active_chip else None)
 
         sections.append(news_section)
         sections.append("")
@@ -4005,16 +4183,21 @@ def run_bot(team_id, test_mode=False):
     starters = starters.sort_values('score', ascending=False)
     captain_row, vice_row = starters.iloc[0], starters.iloc[1]
 
+    lineup_chip = chip if chip in ('bboost', '3xc') else None
     if automated and not test_mode and len(squad) >= 15:
         submit_lineup(session, team_id, starters, subs,
-                      int(captain_row.id), int(vice_row.id))
+                      int(captain_row.id), int(vice_row.id), chip=lineup_chip)
+
+    chips_list = (chip_rows(chip_gain_map, chip, chip_reason, chips_available, automated)
+                  if (chip_gain_map or chip) else evaluate_chips(squad, subs, captain_row))
 
     sections.append(format_xi(starters, subs, captain_row, vice_row))
     sections.append("")
-    sections.append(f"Captain      : {captain_row.web_name}  ({captain_row.score:.2f})")
+    sections.append(f"Captain      : {captain_row.web_name}  ({captain_row.score:.2f})"
+                    + ("  x3 TRIPLE CAPTAIN" if chip == '3xc' else ""))
     sections.append(f"Vice-captain : {vice_row.web_name}  ({vice_row.score:.2f})")
     sections.append("")
-    sections.append(format_chip_section(evaluate_chips(squad, subs, captain_row), None))
+    sections.append(format_chip_section(chips_list, None))
 
     body = "\n".join(sections)
     print(body)
@@ -4039,8 +4222,7 @@ def run_bot(team_id, test_mode=False):
          "<b>Automation is unavailable.</b> Make these changes in the FPL app yourself."),
         news_risks, _in_risks, players_df, tl,
         starters, subs, captain_row, vice_row,
-        [{'name': c[0], 'recommend': c[1], 'reason': c[2]}
-         for c in evaluate_chips(squad, subs, captain_row)],
+        [{'name': c[0], 'recommend': c[1], 'reason': c[2]} for c in chips_list],
         LLM_TEAM_NEWS_ENABLED)
 
     poster = build_squad_poster(
@@ -4053,8 +4235,7 @@ def run_bot(team_id, test_mode=False):
         gameweek, players_df, squad, starters, subs, captain_row, vice_row,
         snapshot_transfers_from_plan(_transfers, hit_cost),
         locals().get('plan_log') or [],
-        news_risks, automated, bank,
-        evaluate_chips(squad, subs, captain_row), team_id)
+        news_risks, automated, bank, chips_list, team_id)
 
     if test_mode:
         print("\nTEST MODE — nothing submitted, no email, nothing saved.")
@@ -4062,6 +4243,8 @@ def run_bot(team_id, test_mode=False):
 
     subject = (f"GW{gameweek} team updated" if automated
                else f"GW{gameweek} ACTION NEEDED — automation is down")
+    if chip:
+        subject += f" — {CHIP_LABELS.get(chip, chip)}" + ("" if automated else " recommended")
     # Record first, email second. The submissions above are already live, so
     # the duplicate guard matters more than the notification.
     mark_processed(gameweek)
