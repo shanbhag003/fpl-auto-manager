@@ -3250,35 +3250,122 @@ def submit_transfers_bulk(session, team_id, gameweek, transfers, selling_prices=
 # flags injuries and suspensions — a fit player who won't start still reads
 # as fully available.
 #
-# This asks Claude to check current team news for the squad and return a
-# "minutes risk" per player. The risk can only ever LOWER a player's rating,
-# never raise it, so a wrong answer costs at most one good player.
+# This asks an LLM with web search to check current team news for the squad
+# and return a "minutes risk" per player. The risk can only ever LOWER a
+# player's rating, never raise it, so a wrong answer costs at most one good
+# player.
 #
-# COST: web search is $10 per 1,000 searches. Searching by club rather than
-# by player keeps it to ~3 searches per gameweek — roughly $1.30 a season.
+# COST: nothing on Gemini's free tier (Google Search grounding, well within
+# its daily quota at ~8 searches a week). Claude is the paid fallback: web
+# search is $10 per 1,000 searches, roughly $1.30 a season.
 #
 # SETUP:
-#   ANTHROPIC_API_KEY  environment variable in Lambda
-#   LLM_TEAM_NEWS_ENABLED below: leave False until you trust its judgement.
-#   While False it still runs and still reports, but changes nothing.
+#   GEMINI_API_KEY     environment variable in Lambda (free, from Google AI
+#                      Studio). Takes priority over ANTHROPIC_API_KEY.
+#   LLM_TEAM_NEWS_ENABLED below: False reports only and changes nothing.
+#   Turned on after GW5: its one strong call (Joao Pedro, 0.75) was right
+#   and its misses were mild 0.2-0.3 flags.
 # ---------------------------------------------------------------------------
 
-LLM_TEAM_NEWS_ENABLED = False      # False = report only. True = let it affect decisions.
+LLM_TEAM_NEWS_ENABLED = True       # False = report only. True = let it affect decisions.
+# Provider: Gemini's free tier (Google Search grounding) when GEMINI_API_KEY is
+# set, otherwise Claude when ANTHROPIC_API_KEY is. Gemini costs nothing at
+# ~8 searches a week; Claude costs ~$0.05 a week.
+GEMINI_MODEL = "gemini-2.5-flash"
 LLM_MODEL = "claude-haiku-4-5-20251001"
 LLM_MAX_SEARCHES = 3               # hard cap. Each search costs $0.01.
 LLM_TIMEOUT = 45
 LLM_MAX_RISK = 0.75                # never wipe a player out completely on news alone
 
 
+def _ask_gemini(prompt, api_key, label):
+    """Gemini with Google Search grounding. Returns the reply text, or None."""
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{GEMINI_MODEL}:generateContent")
+    body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2000}}
+    try:
+        resp = requests.post(url, headers={"x-goog-api-key": api_key,
+                                           "content-type": "application/json"},
+                             data=json.dumps(body), timeout=LLM_TIMEOUT)
+    except requests.RequestException as e:
+        print(f"[news] Gemini request failed ({type(e).__name__}) — continuing without team news.")
+        return None
+    if resp.status_code != 200:
+        print(f"[news] Gemini HTTP {resp.status_code} — continuing without team news. "
+              f"{resp.text[:200]!r}")
+        return None
+    try:
+        data = resp.json()
+        cand = data['candidates'][0]
+    except (ValueError, KeyError, IndexError):
+        print("[news] Gemini returned no answer — continuing without team news.")
+        return None
+    queries = (cand.get('groundingMetadata') or {}).get('webSearchQueries') or []
+    usage = data.get('usageMetadata', {})
+    print(f"[news/{label}] Gemini: {len(queries)} search(es), "
+          f"{usage.get('promptTokenCount', 0)} in / {usage.get('candidatesTokenCount', 0)} "
+          f"out tokens — free tier.")
+    return "".join(part.get('text', '') for part in (cand.get('content') or {}).get('parts', []))
+
+
+def _ask_claude(prompt, api_key, max_searches, label):
+    """Claude with web search (paid). Returns the reply text, or None."""
+    body = {
+        "model": LLM_MODEL,
+        "max_tokens": 1500,
+        "messages": [{"role": "user", "content": prompt}],
+        "tools": [{
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": max_searches,
+        }],
+    }
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": api_key,
+                     "anthropic-version": "2023-06-01",
+                     "content-type": "application/json"},
+            data=json.dumps(body), timeout=LLM_TIMEOUT)
+    except requests.RequestException as e:
+        print(f"[news] Request failed ({type(e).__name__}) — continuing without team news.")
+        return None
+
+    if resp.status_code != 200:
+        print(f"[news] HTTP {resp.status_code} — continuing without team news. "
+              f"{resp.text[:200]!r}")
+        return None
+
+    try:
+        data = resp.json()
+    except ValueError:
+        print("[news] Non-JSON response — continuing without team news.")
+        return None
+
+    searches = sum(1 for b in data.get('content', [])
+                   if b.get('type') == 'server_tool_use')
+    usage = data.get('usage', {})
+    cost = (searches * 0.01
+            + usage.get('input_tokens', 0) / 1e6 * 1.0
+            + usage.get('output_tokens', 0) / 1e6 * 5.0)
+    print(f"[news/{label}] {searches} search(es), {usage.get('input_tokens',0)} in / "
+          f"{usage.get('output_tokens',0)} out tokens — about ${cost:.3f} this run.")
+    return "".join(b.get('text', '') for b in data.get('content', [])
+                   if b.get('type') == 'text')
+
+
 def fetch_minutes_risk(squad_df, gameweek, max_searches=None, label='squad'):
-    """Ask Claude for current team news on the squad.
+    """Ask an LLM with web search for current team news on the squad.
 
     Returns {player_id: {"risk": float, "reason": str}}. Empty dict on any
-    failure — the bot then behaves exactly as it does today.
+    failure — the bot then behaves exactly as it would without team news.
     """
-    api_key = os.environ.get('ANTHROPIC_API_KEY', '').strip()
-    if not api_key:
-        print("[news] No ANTHROPIC_API_KEY set — skipping team news check.")
+    gemini_key = os.environ.get('GEMINI_API_KEY', '').strip()
+    claude_key = os.environ.get('ANTHROPIC_API_KEY', '').strip()
+    if not (gemini_key or claude_key):
+        print("[news] No GEMINI_API_KEY or ANTHROPIC_API_KEY set — skipping team news check.")
         return {}
 
     if squad_df is None or len(squad_df) == 0:
@@ -3299,6 +3386,12 @@ def fetch_minutes_risk(squad_df, gameweek, max_searches=None, label='squad'):
             record = (f"{starts} starts, {mins} mins, {pts} FPL points last season")
         else:
             record = "no Premier League record — likely a new signing or promoted"
+        # This season so far, and FPL's own flag, as facts to check claims against.
+        record += (f"; this season {int(getattr(r, 'starts', 0) or 0)} starts, "
+                   f"{int(getattr(r, 'minutes', 0) or 0)} mins")
+        fpl_news = str(getattr(r, 'news', '') or '').strip()
+        if fpl_news:
+            record += f"; FPL says: {fpl_news}"
         by_club.setdefault(r.team_name, []).append(
             (pid, f"{r.web_name} (id {pid}) — {record}"))
 
@@ -3344,50 +3437,10 @@ not your interpretation of it.
 risk is 0.0 to 1.0: 0.2 slight doubt, 0.5 likely rotated, 0.8 very unlikely to
 start. Keep reason under 15 words. If you found nothing, return {{"players": []}}."""
 
-    body = {
-        "model": LLM_MODEL,
-        "max_tokens": 1500,
-        "messages": [{"role": "user", "content": prompt}],
-        "tools": [{
-            "type": "web_search_20250305",
-            "name": "web_search",
-            "max_uses": max_searches,
-        }],
-    }
-
-    try:
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": api_key,
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            data=json.dumps(body), timeout=LLM_TIMEOUT)
-    except requests.RequestException as e:
-        print(f"[news] Request failed ({type(e).__name__}) — continuing without team news.")
+    text = (_ask_gemini(prompt, gemini_key, label) if gemini_key
+            else _ask_claude(prompt, claude_key, max_searches, label))
+    if text is None:
         return {}
-
-    if resp.status_code != 200:
-        print(f"[news] HTTP {resp.status_code} — continuing without team news. "
-              f"{resp.text[:200]!r}")
-        return {}
-
-    try:
-        data = resp.json()
-    except ValueError:
-        print("[news] Non-JSON response — continuing without team news.")
-        return {}
-
-    searches = sum(1 for b in data.get('content', [])
-                   if b.get('type') == 'server_tool_use')
-    usage = data.get('usage', {})
-    cost = (searches * 0.01
-            + usage.get('input_tokens', 0) / 1e6 * 1.0
-            + usage.get('output_tokens', 0) / 1e6 * 5.0)
-    print(f"[news/{label}] {searches} search(es), {usage.get('input_tokens',0)} in / "
-          f"{usage.get('output_tokens',0)} out tokens — about ${cost:.3f} this run.")
-
-    text = "".join(b.get('text', '') for b in data.get('content', [])
-                   if b.get('type') == 'text')
     text = text.strip().removeprefix('```json').removeprefix('```').removesuffix('```').strip()
     start, end = text.find('{'), text.rfind('}')
     if start == -1 or end == -1:
