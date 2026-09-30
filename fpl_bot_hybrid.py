@@ -3272,9 +3272,12 @@ LLM_TEAM_NEWS_ENABLED = True       # False = report only. True = let it affect d
 # Provider: Gemini's free tier (Google Search grounding) when GEMINI_API_KEY is
 # set, otherwise Claude when ANTHROPIC_API_KEY is. Gemini costs nothing at
 # ~8 RSS fetches and one model call a week; Claude costs ~$0.05 a week.
-# Tried in order; a 404 means Google has retired or restricted that model
-# (2.5 Flash went that way in 2026), so the next one is tried.
-GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash"]
+# Tried in order. A model that is retired (404, as 2.5 Flash went in 2026),
+# out of free quota (429) or overloaded (500/503) passes to the next one.
+GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
+                 "gemini-3.6-flash"]
+GEMINI_BUSY_RETRIES = 2       # extra tries per model on 500/503 ("high demand")
+GEMINI_BUSY_WAIT = 8          # seconds between them
 LLM_MODEL = "claude-haiku-4-5-20251001"
 LLM_MAX_SEARCHES = 3               # hard cap. Each search costs $0.01.
 LLM_TIMEOUT = 45
@@ -3341,22 +3344,45 @@ def _ask_gemini(prompt, api_key, label):
     The key goes in the x-goog-api-key header: Google's newer "AQ." keys are
     rejected as a ?key= parameter.
     """
+    # JSON mode with a schema: free text broke on a quote inside a "reason".
+    # (It can't be combined with the search tool, which is why this is only
+    # possible now that the bot supplies the headlines itself.)
+    schema = {"type": "OBJECT", "required": ["players"], "properties": {
+        "players": {"type": "ARRAY", "items": {
+            "type": "OBJECT", "required": ["id", "risk", "reason"],
+            "properties": {"id": {"type": "INTEGER"}, "risk": {"type": "NUMBER"},
+                           "reason": {"type": "STRING"}, "source": {"type": "STRING"}}}}}}
     body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2000}}
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4000,
+                                 "responseMimeType": "application/json",
+                                 "responseSchema": schema}}
+    resp = None
     for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        try:
-            resp = requests.post(url, headers={"x-goog-api-key": api_key,
-                                               "content-type": "application/json"},
-                                 data=json.dumps(body), timeout=LLM_TIMEOUT)
-        except requests.RequestException as e:
-            print(f"[news] Gemini request failed ({type(e).__name__}) — continuing without team news.")
-            return None
-        # 404: model retired or restricted. 429: this model's free quota is
-        # used up. Quotas are per model, so the next one may still answer.
-        if resp.status_code not in (404, 429):
+        for attempt in range(1 + GEMINI_BUSY_RETRIES):
+            try:
+                resp = requests.post(url, headers={"x-goog-api-key": api_key,
+                                                   "content-type": "application/json"},
+                                     data=json.dumps(body), timeout=LLM_TIMEOUT)
+            except requests.RequestException as e:
+                print(f"[news] Gemini {model} request failed ({type(e).__name__}).")
+                resp = None
+                break
+            # 500/503: Google's "high demand", usually gone within seconds.
+            if resp.status_code not in (500, 503) or attempt == GEMINI_BUSY_RETRIES:
+                break
+            print(f"[news] Gemini {model} busy ({resp.status_code}); "
+                  f"retrying in {GEMINI_BUSY_WAIT}s.")
+            time.sleep(GEMINI_BUSY_WAIT)
+        # Quotas and load are per model, so the next one may still answer.
+        if resp is not None and resp.status_code not in (404, 429, 500, 503):
             break
-        print(f"[news] Gemini model {model} returned {resp.status_code} — trying the next one.")
+        print(f"[news] Gemini {model} unavailable"
+              + (f" ({resp.status_code})" if resp is not None else "")
+              + " — trying the next one.")
+    if resp is None:
+        print("[news] No Gemini model answered — continuing without team news.")
+        return None
     if resp.status_code != 200:
         print(f"[news] Gemini HTTP {resp.status_code} — continuing without team news. "
               f"{resp.text[:200]!r}")
@@ -3532,7 +3558,8 @@ start. Keep reason under 15 words. If you found nothing, return {{"players": []}
     try:
         parsed = json.loads(text[start:end + 1])
     except ValueError as e:
-        print(f"[news] Could not parse the reply ({e}) — continuing without team news.")
+        print(f"[news] Could not parse the reply ({e}) — continuing without team news. "
+              f"Reply began: {text[:300]!r}")
         return {}
 
     valid_ids = set(int(i) for i in squad_df['id'])
