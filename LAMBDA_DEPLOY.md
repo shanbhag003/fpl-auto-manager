@@ -59,7 +59,7 @@ replacing `ACCOUNT_ID` with your 12-digit account ID (top-right menu in the cons
     "Condition": {
       "StringEquals": {
         "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-        "token.actions.githubusercontent.com:sub": "repo:shanbhag003/fpl-auto-manager:environment:production"
+        "token.actions.githubusercontent.com:sub": "repo:shanbhag003@67545113/fpl-auto-manager@1321217431:environment:production"
       }
     }
   }]
