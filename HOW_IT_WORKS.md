@@ -193,9 +193,45 @@ all season.
 
 ---
 
+### Replaced: one solve for the whole plan
+
+The chained planner above is now only the fallback for when the solver layer is
+missing. After GW5 it had made one transfer in four gameweeks, for three
+reasons:
+
+- **A swap pays off for weeks, but was judged on one.** The GW3 swap
+  Virgil → Tarkowski (+1.21/week, about +4 over the horizon) failed the
+  1.5-per-week bar, and so did every similar swap after it.
+- **Saving a transfer was always treated as free.** It isn't at the cap: FPL
+  banks at most five, and one rolled past that is lost.
+- **Every player counted as a starter.** Upgrading a fifth defender who'd sit
+  on the bench scored the same as upgrading a starter.
+
+`optimise_transfers` now picks the new fifteen in a single MILP. It maximises
+what FPL actually scores (the XI and captain this week, plus the decayed
+weeks after it), minus hits, plus 2.0 for each free transfer carried into next
+week, up to the cap. Doing nothing is always feasible, so it only acts when
+the whole plan beats holding.
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `FT_ROLL_VALUE` | 2.0 | worth of a saved free transfer; also the bar a free transfer must clear over the horizon |
+| `HIT_MARGIN` | 2.0 | charged on top of each −4, because the best of many noisy projections runs optimistic |
+| `BENCH_WEIGHT` | 0.1 | share of a bench player's score that ever counts, via auto-subs |
+| `FUTURE_WEEKS_WEIGHT` | 2.5 | the four weeks after this one, decayed as in the fixture view |
+
+These are judgement values, not measured ones; the multi-season backtest is
+what should tune them. On the GW6 squad the chained planner made four free
+transfers. The solver made the same four plus one hit, and projected the
+starting XI 6.3 points higher over the horizon (2.3 after the hit).
+
 ## 5. Squad optimisation
 
 Picking 15 players is a constrained optimisation, not a ranking:
+
+The objective below was the original. It now values the squad by its best XI
+and captain, with the bench at `BENCH_WEIGHT`. The solver picks the lineup
+alongside the squad, so budget flows to the players who start.
 
 ```
 MAXIMIZE     Σ score[p] × pick[p]
