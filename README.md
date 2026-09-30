@@ -28,7 +28,8 @@ When it does act:
 2. Checks current team news for anything the data can't show
 3. Plans transfers, chaining up to five while each clears a threshold
 4. Picks the best legal XI, captain, vice-captain and bench order
-5. Flags any chip worth considering — never plays one
+5. Plays a chip when its projected gain clears a backtested threshold, and
+   uses up any chip before its window closes
 6. Submits everything, then emails the reasoning with a shareable squad image
 7. Commits its projection for every player in the game, before a ball is kicked
 
@@ -122,8 +123,6 @@ the results. It is hardcoded to GW1 and should not be run again.
 
 ## What it deliberately doesn't do
 
-- **Play chips.** Wildcard, Free Hit, Bench Boost and Triple Captain are
-  one-shot decisions worth too much to hand to a threshold. The bot flags them.
 - **Model price changes.** Not attempted.
 - **Value volatility.** It scores averages, so it can't distinguish a reliable
   six from an explosive one — which is exactly the difference that wins a
