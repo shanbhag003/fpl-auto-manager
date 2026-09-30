@@ -1143,8 +1143,65 @@ def evaluate_chips(squad_df, bench_df, captain_row):
 
 
 # --- Suggested rebuild squad, shown only when Wildcard or Free Hit is flagged ---
+# --- What a squad is worth ---------------------------------------------------
+# Only the XI and the captain score. The bench scores only through
+# auto-substitution, so counting all fifteen equally spends budget on players
+# who sit on the bench most weeks. The optimisers below value a squad the way
+# FPL does: the best legal XI, the captain counted twice, and the bench at a
+# small weight for the weeks a starter doesn't play.
+BENCH_WEIGHT = 0.1                 # share of a bench player's score that ever counts
+FUTURE_WEEKS_WEIGHT = sum(FIXTURE_WEIGHTS[1:])   # the weeks after this one, decayed (2.5)
+XI_FORMATION = {1: (1, 1), 2: (3, 5), 3: (2, 5), 4: (1, 3)}   # position: (min, max) starters
+
+
+def _lineup_value(pulp, prob, pick, ids, pos, value, tag):
+    """Objective term: best XI + captain + bench share, for one set of scores.
+
+    Adds XI and captain variables tied to `pick`, so the solver chooses the
+    lineup as part of choosing the squad. Returns the linear expression.
+    """
+    xi = pulp.LpVariable.dicts(f"xi_{tag}", ids, cat="Binary")
+    cap = pulp.LpVariable.dicts(f"cap_{tag}", ids, cat="Binary")
+    for i in ids:
+        prob += xi[i] <= pick[i]
+        prob += cap[i] <= xi[i]
+    prob += pulp.lpSum(xi[i] for i in ids) == 11
+    prob += pulp.lpSum(cap[i] for i in ids) == 1
+    for p, (lo, hi) in XI_FORMATION.items():
+        n = pulp.lpSum(xi[i] for i in ids if pos[i] == p)
+        prob += n >= lo
+        prob += n <= hi
+    return pulp.lpSum(value[i] * (xi[i] + cap[i] + BENCH_WEIGHT * (pick[i] - xi[i]))
+                      for i in ids)
+
+
+def _squad_objective(pulp, prob, pick, ids, pos, df):
+    """This week's lineup value plus the decayed value of the weeks after it."""
+    now_col = 'score_now' if 'score_now' in df.columns else 'score'
+    now = dict(zip(df.id, df[now_col].astype(float)))
+    run = dict(zip(df.id, df['score'].astype(float)))
+    return (_lineup_value(pulp, prob, pick, ids, pos, now, 'now')
+            + FUTURE_WEEKS_WEIGHT * _lineup_value(pulp, prob, pick, ids, pos, run, 'run'))
+
+
+def squad_value(squad_df):
+    """What _squad_objective scores a fixed squad at, without a solver.
+
+    For reporting only. The best XI under the formation limits is found
+    greedily, which is exact for these constraints.
+    """
+    def one(col):
+        if col not in squad_df.columns or len(squad_df) < 15:
+            return 0.0
+        starters, subs = pick_starting_xi(squad_df.assign(score_now=squad_df[col]))
+        v = starters[col].astype(float)
+        return float(v.sum() + v.max() + BENCH_WEIGHT * subs[col].astype(float).sum())
+    now_col = 'score_now' if 'score_now' in squad_df.columns else 'score'
+    return one(now_col) + FUTURE_WEEKS_WEIGHT * one('score')
+
+
 def build_suggested_squad(players_df, budget):
-    """Optimal 15-man squad within `budget`, maximising total `score`.
+    """Optimal 15-man squad within `budget`, by the value of its best XI.
 
     Uses PuLP + CBC for a true mathematical optimum. If the PuLP layer isn't
     attached, falls back to build_suggested_squad_fallback(), which gets within
@@ -1171,12 +1228,11 @@ def build_suggested_squad(players_df, budget):
     ids = eligible.id.tolist()
     pick = pulp.LpVariable.dicts("pick", ids, cat="Binary")
 
-    score = dict(zip(eligible.id, eligible.score.astype(float)))
     cost = dict(zip(eligible.id, eligible.now_cost.astype(float)))
     pos = dict(zip(eligible.id, eligible.element_type.astype(int)))
     club = dict(zip(eligible.id, eligible.team.astype(int)))
 
-    prob += pulp.lpSum(pick[i] * score[i] for i in ids)
+    prob += _squad_objective(pulp, prob, pick, ids, pos, eligible)
     prob += pulp.lpSum(pick[i] * cost[i] for i in ids) <= budget
 
     for p, need in POSITION_REQUIREMENTS.items():
@@ -2701,11 +2757,145 @@ def format_rebuild_section(transfers, players_df, budget):
 
 MAX_TRANSFERS_PER_GW = 5      # safety cap, matches FPL's free-transfer bank limit
 MAX_HITS_PER_GW = 1           # how many -4 hits the bot may take in one gameweek
+MAX_FREE_TRANSFERS = 5        # FPL's bank cap; a transfer rolled past it is lost
+FT_ROLL_VALUE = 2.0           # points a saved free transfer is worth next week.
+                              # It is also the bar a free transfer has to clear
+                              # over the whole horizon, so small projected gains —
+                              # mostly model noise — don't get bought.
+HIT_MARGIN = 2.0              # on top of the 4-point hit: projected gains are the
+                              # best of many noisy options, so they run optimistic
+
+
+def optimise_transfers(my_team, players_df, bank, free_transfers, made,
+                       hit_cost, selling_prices=None):
+    """Choose every transfer this gameweek in one solve.
+
+    The chained planner judged one swap at a time on the raw score difference
+    against a per-gameweek bar. That had three blind spots:
+
+      - A swap pays off over several weeks, but was judged on one. A +1.2/week
+        upgrade (~+4 over the horizon) was rejected, week after week.
+      - Upgrading a player who'd sit on the bench anyway counted the same as
+        upgrading a starter.
+      - Saving a transfer was always treated as free. At the 5-transfer cap it
+        isn't: the rolled transfer is simply lost.
+
+    Here the solver picks the new 15 to maximise what FPL actually scores —
+    the XI and captain, this week plus the decayed weeks after — minus hits,
+    plus FT_ROLL_VALUE for each free transfer carried into next week, up to
+    the cap. Doing nothing is always feasible, so it only transfers when the
+    whole plan beats holding.
+
+    Returns the same (transfers, squad, log) as plan_transfers, or None if the
+    solver is unavailable so the caller can fall back.
+    """
+    try:
+        import pulp
+    except ImportError:
+        return None
+
+    selling_prices = selling_prices or {}
+    available_free = max(0, (free_transfers or 0) - (made or 0))
+    owned = set(int(i) for i in my_team['id'])
+
+    # Players already owned stay eligible whatever their status — keeping an
+    # injured player is a real option. Buys must be fully available.
+    eligible = players_df.loc[
+        players_df['id'].isin(owned)
+        | ((players_df['status'] == 'a') & players_df['now_cost'].notna())].copy()
+    eligible = eligible[eligible['score'].notna()]
+    ids = [int(i) for i in eligible['id']]
+    if not owned.issubset(ids):
+        print("[optimise] Some owned players are missing from the data — falling back.")
+        return None
+
+    pos = dict(zip(ids, eligible['element_type'].astype(int)))
+    club = dict(zip(ids, eligible['team'].astype(int)))
+    price = {i: (selling_prices.get(i, int(c)) if i in owned else int(c))
+             for i, c in zip(ids, eligible['now_cost'])}
+    budget = (bank or 0) + sum(price[i] for i in owned)
+
+    prob = pulp.LpProblem("Transfers", pulp.LpMaximize)
+    pick = pulp.LpVariable.dicts("pick", ids, cat="Binary")
+    n_in = pulp.lpSum(pick[i] for i in ids if i not in owned)
+    hits = pulp.LpVariable("hits", lowBound=0, upBound=MAX_HITS_PER_GW, cat="Integer")
+    rolled = pulp.LpVariable("rolled", lowBound=0, upBound=MAX_FREE_TRANSFERS - 1)
+
+    prob += (_squad_objective(pulp, prob, pick, ids, pos, eligible)
+             - (hit_cost + HIT_MARGIN) * hits
+             + FT_ROLL_VALUE * rolled)
+
+    prob += pulp.lpSum(pick[i] * price[i] for i in ids) <= budget
+    for p, need in {1: 2, 2: 5, 3: 5, 4: 3}.items():
+        prob += pulp.lpSum(pick[i] for i in ids if pos[i] == p) == need
+    for c in set(club.values()):
+        prob += pulp.lpSum(pick[i] for i in ids if club[i] == c) <= 3
+    prob += n_in <= MAX_TRANSFERS_PER_GW
+    prob += hits >= n_in - available_free
+    # Free transfers not used this week carry over (the +1 for next week is
+    # added by FPL on top, which is why the cap here is one below FPL's).
+    prob += rolled <= available_free - n_in + hits
+
+    try:
+        prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60))
+    except Exception as e:
+        print(f"[optimise] Solver failed ({e}) — falling back.")
+        return None
+    if pulp.LpStatus[prob.status] != "Optimal":
+        print(f"[optimise] No optimal plan ({pulp.LpStatus[prob.status]}) — falling back.")
+        return None
+
+    new_ids = {i for i in ids if pick[i].value() > 0.5}
+    out_ids, in_ids = owned - new_ids, new_ids - owned
+    n_hits = int(round(hits.value() or 0))
+
+    log = [f"{available_free} free transfer(s) available; optimised the whole plan "
+           f"over this week and the next {FIXTURE_HORIZON - 1}."]
+
+    # Pair leavers with arrivals within each position, worst out with best in,
+    # so each line in the email reads sensibly. The decision was made on the
+    # squad as a whole; per-pair gains are only for explanation.
+    lookup = players_df.set_index('id', drop=False)
+    transfers = []
+    for p in (1, 2, 3, 4):
+        outs = sorted((i for i in out_ids if pos[i] == p), key=lambda i: lookup.at[i, 'score'])
+        ins = sorted((i for i in in_ids if pos[i] == p), key=lambda i: -lookup.at[i, 'score'])
+        for o, n in zip(outs, ins):
+            gain = float(lookup.at[n, 'score']) - float(lookup.at[o, 'score'])
+            is_free = len(transfers) < available_free
+            transfers.append((players_df.loc[players_df.id == o],
+                              players_df.loc[players_df.id == n], gain, is_free))
+            log.append(f"{'FREE' if is_free else f'-{hit_cost} HIT'}: "
+                       f"{lookup.at[o, 'web_name']} -> {lookup.at[n, 'web_name']} "
+                       f"({gain:+.2f}/week)")
+
+    if not transfers:
+        log.append(f"Stopping: no set of transfers beats saving them "
+                   f"(a saved free transfer is worth {FT_ROLL_VALUE:.1f}, up to the "
+                   f"{MAX_FREE_TRANSFERS}-transfer cap).")
+    squad = players_df[players_df['id'].isin(new_ids)].copy()
+    if transfers:
+        try:
+            before, after = squad_value(my_team), squad_value(squad)
+            net = after - before - n_hits * hit_cost
+            log.append(f"Starting XI + captain, this week and the next "
+                       f"{FIXTURE_HORIZON - 1}: {before:.1f} -> {after:.1f} "
+                       f"({after - before:+.1f}"
+                       + (f", {net:+.1f} after {n_hits} hit(s))" if n_hits else ")"))
+        except Exception as e:      # reporting only; never block a live run on it
+            print(f"[optimise] Could not value the squads for the log ({e}).")
+    return transfers, squad, log
 
 
 def plan_transfers(my_team, players_df, bank, free_transfers, made,
                    hit_cost, selling_prices=None):
-    """Plan every worthwhile transfer, not just one.
+    """Plan this gameweek's transfers.
+
+    Uses optimise_transfers() when the solver is available; the chained
+    one-swap-at-a-time search below is the fallback.
+
+    FPL lets you bank up to 5 free transfers. Making only one swap when three
+    are free and all three clear the bar leaves points on the table.
 
     FPL lets you bank up to 5 free transfers. Making only one swap when three
     are free and all three clear the bar leaves points on the table.
@@ -2717,6 +2907,12 @@ def plan_transfers(my_team, players_df, bank, free_transfers, made,
     Returns (transfers, squad, log_lines) where transfers is a list of
     (player_out, player_in, gain, was_free).
     """
+    planned = optimise_transfers(my_team, players_df, bank, free_transfers, made,
+                                 hit_cost, selling_prices)
+    if planned is not None:
+        return planned
+    print("[plan] Optimiser unavailable — using the chained planner.")
+
     available_free = max(0, (free_transfers or 0) - (made or 0))
     selling_prices = selling_prices or {}
 
@@ -2810,7 +3006,6 @@ def format_transfer_plan(transfers, log, hit_cost):
 
     hits = sum(1 for t in transfers if not t[3])
     total_gain = sum(t[2] for t in transfers)
-    net = total_gain - hits * hit_cost
 
     lines = [f"{len(transfers)} transfer(s) made "
              f"({len(transfers) - hits} free, {hits} on a hit).", ""]
@@ -2818,14 +3013,12 @@ def format_transfer_plan(transfers, log, hit_cost):
     for player_out, player_in, gain, was_free in transfers:
         tag = "free" if was_free else f"-{hit_cost} hit"
         lines.append(f"  OUT {player_out.web_name.iat[0]:<18} "
-                     f"IN {player_in.web_name.iat[0]:<18} +{gain:.2f}  ({tag})")
+                     f"IN {player_in.web_name.iat[0]:<18} {gain:+.2f}  ({tag})")
         lines.append(f"      out: {explain_player(player_out.iloc[0])}")
         lines.append(f"      in : {explain_player(player_in.iloc[0])}")
         lines.append("")
 
-    lines.append(f"Projected gain: +{total_gain:.2f} points.")
-    if hits:
-        lines.append(f"Less {hits} x {hit_cost} pts for hits = net +{net:.2f} points.")
+    lines.append(f"Score difference, summed over the swaps: {total_gain:+.2f} per week.")
     lines.append("")
     lines += log
     return "\n".join(lines)
