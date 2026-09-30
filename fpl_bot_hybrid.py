@@ -3271,7 +3271,9 @@ LLM_TEAM_NEWS_ENABLED = True       # False = report only. True = let it affect d
 # Provider: Gemini's free tier (Google Search grounding) when GEMINI_API_KEY is
 # set, otherwise Claude when ANTHROPIC_API_KEY is. Gemini costs nothing at
 # ~8 searches a week; Claude costs ~$0.05 a week.
-GEMINI_MODEL = "gemini-2.5-flash"
+# Tried in order; a 404 means Google has retired or restricted that model
+# (2.5 Flash went that way in 2026), so the next one is tried.
+GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash"]
 LLM_MODEL = "claude-haiku-4-5-20251001"
 LLM_MAX_SEARCHES = 3               # hard cap. Each search costs $0.01.
 LLM_TIMEOUT = 45
@@ -3279,19 +3281,26 @@ LLM_MAX_RISK = 0.75                # never wipe a player out completely on news 
 
 
 def _ask_gemini(prompt, api_key, label):
-    """Gemini with Google Search grounding. Returns the reply text, or None."""
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{GEMINI_MODEL}:generateContent")
+    """Gemini with Google Search grounding. Returns the reply text, or None.
+
+    The key goes in the x-goog-api-key header: Google's newer "AQ." keys are
+    rejected as a ?key= parameter.
+    """
     body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "tools": [{"google_search": {}}],
             "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2000}}
-    try:
-        resp = requests.post(url, headers={"x-goog-api-key": api_key,
-                                           "content-type": "application/json"},
-                             data=json.dumps(body), timeout=LLM_TIMEOUT)
-    except requests.RequestException as e:
-        print(f"[news] Gemini request failed ({type(e).__name__}) — continuing without team news.")
-        return None
+    for model in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        try:
+            resp = requests.post(url, headers={"x-goog-api-key": api_key,
+                                               "content-type": "application/json"},
+                                 data=json.dumps(body), timeout=LLM_TIMEOUT)
+        except requests.RequestException as e:
+            print(f"[news] Gemini request failed ({type(e).__name__}) — continuing without team news.")
+            return None
+        if resp.status_code != 404:
+            break
+        print(f"[news] Gemini model {model} not available (404) — trying the next one.")
     if resp.status_code != 200:
         print(f"[news] Gemini HTTP {resp.status_code} — continuing without team news. "
               f"{resp.text[:200]!r}")
@@ -3304,7 +3313,7 @@ def _ask_gemini(prompt, api_key, label):
         return None
     queries = (cand.get('groundingMetadata') or {}).get('webSearchQueries') or []
     usage = data.get('usageMetadata', {})
-    print(f"[news/{label}] Gemini: {len(queries)} search(es), "
+    print(f"[news/{label}] Gemini {model}: {len(queries)} search(es), "
           f"{usage.get('promptTokenCount', 0)} in / {usage.get('candidatesTokenCount', 0)} "
           f"out tokens — free tier.")
     return "".join(part.get('text', '') for part in (cand.get('content') or {}).get('parts', []))
