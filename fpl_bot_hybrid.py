@@ -3255,9 +3255,10 @@ def submit_transfers_bulk(session, team_id, gameweek, transfers, selling_prices=
 # player's rating, never raise it, so a wrong answer costs at most one good
 # player.
 #
-# COST: nothing on Gemini's free tier (Google Search grounding, well within
-# its daily quota at ~8 searches a week). Claude is the paid fallback: web
-# search is $10 per 1,000 searches, roughly $1.30 a season.
+# COST: nothing. With GEMINI_API_KEY the bot pulls each club's last few days
+# of headlines from Google News RSS (free, keyless) and free-tier Gemini reads
+# them; the free tier doesn't include Google Search grounding. Claude with web
+# search is the paid fallback: $10 per 1,000 searches, roughly $1.30 a season.
 #
 # SETUP:
 #   GEMINI_API_KEY     environment variable in Lambda (free, from Google AI
@@ -3270,7 +3271,7 @@ def submit_transfers_bulk(session, team_id, gameweek, transfers, selling_prices=
 LLM_TEAM_NEWS_ENABLED = True       # False = report only. True = let it affect decisions.
 # Provider: Gemini's free tier (Google Search grounding) when GEMINI_API_KEY is
 # set, otherwise Claude when ANTHROPIC_API_KEY is. Gemini costs nothing at
-# ~8 searches a week; Claude costs ~$0.05 a week.
+# ~8 RSS fetches and one model call a week; Claude costs ~$0.05 a week.
 # Tried in order; a 404 means Google has retired or restricted that model
 # (2.5 Flash went that way in 2026), so the next one is tried.
 GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash"]
@@ -3280,14 +3281,67 @@ LLM_TIMEOUT = 45
 LLM_MAX_RISK = 0.75                # never wipe a player out completely on news alone
 
 
-def _ask_gemini(prompt, api_key, label):
-    """Gemini with Google Search grounding. Returns the reply text, or None.
+# Google News search names for FPL's short club names.
+CLUB_SEARCH_NAMES = {
+    'Man City': 'Manchester City', 'Man Utd': 'Manchester United', 'Spurs': 'Tottenham',
+    "Nott'm Forest": 'Nottingham Forest', 'Newcastle': 'Newcastle United',
+    'West Ham': 'West Ham United', 'Brighton': 'Brighton', 'Wolves': 'Wolves',
+    'Leeds': 'Leeds United', 'Sheffield Utd': 'Sheffield United',
+}
+NEWS_DAYS = 4                 # headlines older than this are stale for a deadline
+NEWS_PER_CLUB = 12
 
+
+def fetch_club_headlines(clubs):
+    """Recent injury / team-news headlines per club from Google News RSS.
+
+    Free and keyless. Gemini's free tier doesn't include Google Search
+    grounding (it returns 429), so the bot does the searching and the model
+    only reads. Returns {club: ["[30 Sep] headline (source)", ...]}; a club
+    whose feed fails is simply absent.
+    """
+    import urllib.parse
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=NEWS_DAYS)
+    out = {}
+    for club in clubs:
+        name = CLUB_SEARCH_NAMES.get(club, club)
+        q = (f'"{name}" football (injury OR "team news" OR "ruled out" OR doubt OR fitness '
+             f'OR rested OR suspended OR "press conference") when:{NEWS_DAYS}d')
+        url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(
+            {"q": q, "hl": "en-GB", "gl": "GB", "ceid": "GB:en"})
+        try:
+            resp = requests.get(url, headers=BROWSER_HEADERS, timeout=REQUEST_TIMEOUT)
+            items = ET.fromstring(resp.content).findall('.//item')
+        except Exception as e:
+            print(f"[news] Headlines for {club} unavailable ({type(e).__name__}).")
+            continue
+        lines = []
+        for it in items:
+            try:
+                when = parsedate_to_datetime(it.findtext('pubDate'))
+            except (TypeError, ValueError):
+                continue
+            if when < cutoff:
+                continue
+            lines.append(f"[{when:%d %b}] {it.findtext('title', '').strip()}")
+            if len(lines) >= NEWS_PER_CLUB:
+                break
+        if lines:
+            out[club] = lines
+    return out
+
+
+def _ask_gemini(prompt, api_key, label):
+    """Gemini reading the headlines in the prompt. Returns the reply text, or None.
+
+    No search tool: on the free tier Google Search grounding returns 429.
     The key goes in the x-goog-api-key header: Google's newer "AQ." keys are
     rejected as a ?key= parameter.
     """
     body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "tools": [{"google_search": {}}],
             "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2000}}
     for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -3298,9 +3352,11 @@ def _ask_gemini(prompt, api_key, label):
         except requests.RequestException as e:
             print(f"[news] Gemini request failed ({type(e).__name__}) — continuing without team news.")
             return None
-        if resp.status_code != 404:
+        # 404: model retired or restricted. 429: this model's free quota is
+        # used up. Quotas are per model, so the next one may still answer.
+        if resp.status_code not in (404, 429):
             break
-        print(f"[news] Gemini model {model} not available (404) — trying the next one.")
+        print(f"[news] Gemini model {model} returned {resp.status_code} — trying the next one.")
     if resp.status_code != 200:
         print(f"[news] Gemini HTTP {resp.status_code} — continuing without team news. "
               f"{resp.text[:200]!r}")
@@ -3311,9 +3367,8 @@ def _ask_gemini(prompt, api_key, label):
     except (ValueError, KeyError, IndexError):
         print("[news] Gemini returned no answer — continuing without team news.")
         return None
-    queries = (cand.get('groundingMetadata') or {}).get('webSearchQueries') or []
     usage = data.get('usageMetadata', {})
-    print(f"[news/{label}] Gemini {model}: {len(queries)} search(es), "
+    print(f"[news/{label}] Gemini {model}: "
           f"{usage.get('promptTokenCount', 0)} in / {usage.get('candidatesTokenCount', 0)} "
           f"out tokens — free tier.")
     return "".join(part.get('text', '') for part in (cand.get('content') or {}).get('parts', []))
@@ -3408,6 +3463,27 @@ def fetch_minutes_risk(squad_df, gameweek, max_searches=None, label='squad'):
         f"{club}:\n" + "\n".join(f"  - {line}" for _, line in players)
         for club, players in sorted(by_club.items()))
 
+    if gemini_key:
+        headlines = fetch_club_headlines(sorted(by_club))
+        n = sum(len(v) for v in headlines.values())
+        print(f"[news/{label}] {n} headline(s) from the last {NEWS_DAYS} days "
+              f"across {len(headlines)} of {len(by_club)} club(s).")
+        if not headlines:
+            return {}
+        evidence = ("Recent headlines for each club, newest first, from the last "
+                    f"{NEWS_DAYS} days. They are your ONLY source: do not answer from "
+                    "memory, because squad news goes stale within days. Some headlines "
+                    "are about women's, youth or other teams, or other clubs' players; "
+                    "ignore those.\n\n"
+                    + "\n\n".join(f"{club}:\n" + "\n".join(f"  {h}" for h in lines)
+                                    for club, lines in headlines.items()))
+    else:
+        evidence = (f"Search by CLUB, not by player — one search covers every player at "
+                    f"that club. You may run at most {max_searches} searches, so "
+                    f"prioritise the clubs where news is most likely to matter. Use only "
+                    f"what you find in search results; do not answer from memory, because "
+                    f"squad news goes stale within days.")
+
     prompt = f"""You are checking Fantasy Premier League team news before a deadline.
 
 For each player below, judge how likely they are to MISS or be heavily rotated
@@ -3425,17 +3501,14 @@ contradict it. A player with 30+ starts last season is an established regular,
 not a new signing and not short of match fitness — if you are about to write
 that, you are wrong, so leave them out instead.
 
-Search by CLUB, not by player — one search covers every player at that club.
-You may run at most {max_searches} searches, so prioritise the clubs where
-news is most likely to matter. Use only what you find in search results; do not
-answer from memory, because squad news goes stale within days.
+{evidence}
 
 Squad:
 {roster}
 
 Return ONLY a JSON object, no prose and no markdown fences. Include a player
-ONLY if a search result explicitly said something about THAT player. If you did
-not read it in a result, omit them — an empty list is a perfectly good answer
+ONLY if a source explicitly said something about THAT player. If you did
+not read it in a source, omit them — an empty list is a perfectly good answer
 and far better than a guess. In "reason", state what the source actually said,
 not your interpretation of it.
 
