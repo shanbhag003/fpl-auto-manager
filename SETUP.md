@@ -49,7 +49,15 @@ Mono), because Lambda has none of its own.
 | `SMTP_EMAIL` | No | Gmail address that sends the report |
 | `SMTP_APP_PASSWORD` | No | A Gmail **App Password**, not your account password |
 | `NOTIFY_EMAIL` | No | Where the report lands |
-| `ANTHROPIC_API_KEY` | No | Enables the team news check. Costs about $0.05 a gameweek. |
+| `GEMINI_API_KEY` | No | Enables the team news check, free. From aistudio.google.com → Get API key (new keys start `AQ.`). |
+| `ANTHROPIC_API_KEY` | No | Paid fallback for team news (~$0.05 a gameweek), used only when `GEMINI_API_KEY` isn't set. |
+| `GITHUB_REPO` | No | `owner/repo` the bot publishes the site data to |
+| `GITHUB_TOKEN` | No | Token with contents write on that repo; without it publishing is skipped |
+| `HUMAN_ENTRY_ID` | No | The hand-picked team the site compares against |
+
+**Use the console for these.** `aws lambda update-function-configuration
+--environment` replaces the whole set, which would wipe the token and email
+settings. And don't screenshot this page with the values showing.
 
 Delete `FPL_EMAIL` and `FPL_PASSWORD` if they're still there — the endpoint they
 were sent to no longer exists.
@@ -91,13 +99,14 @@ otherwise there are too few attempts left if FPL happens to be down.
 
 ## 6. Deploy
 
-1. **Code** tab → select everything in `lambda_function.py` → delete
-2. Paste `fpl_bot_hybrid.py`
-3. **Deploy**
-4. **Test** with an empty event `{}`
+Don't paste code into the console. Merge the change into `main` and the
+**Deploy Lambda** GitHub workflow puts it on the function — see
+[LAMBDA_DEPLOY.md](LAMBDA_DEPLOY.md) for the one-time AWS setup. A console edit
+makes the next deploy stop rather than overwrite it; run **Lambda snapshot** to
+bring it back into the repo first.
 
-Do not rename the file inside Lambda. The handler expects
-`lambda_function.lambda_handler`.
+The handler stays `lambda_function.lambda_handler`; the workflow reads it from
+the function and replaces that file only. **Test** with an empty event `{}`.
 
 Expected output away from a deadline:
 
@@ -129,13 +138,17 @@ by hand, subject line `ACTION NEEDED`.
 
 ## Testing before a deadline
 
-`fpl_bot_hybrid_DRYRUN.py` is the same code with three differences: it ignores
-the deadline check so it runs any time, it never submits anything to FPL, and it
-emails the report so the poster can be checked. Paste it, Test, read the email,
-then paste the live build back.
+Locally, with nothing submitted:
 
-**Swap it back afterwards.** Left in place it would skip the deadline check and
-submit nothing on deadline day.
+- `run_bot(team_id, test_mode=True)` runs the whole gameweek — transfers, lineup,
+  chip decision — and submits, emails and saves nothing. Away from a deadline it
+  stops at "Deadline Too Far Away"; patch `check_update` to return
+  `(True, <gw>)` to force it.
+- `tools/check_news.py` runs just the team-news check on the squad and prints
+  the headlines found and each risk. Needs `GEMINI_API_KEY` in the environment.
+
+`fpl_bot_hybrid_DRYRUN.py` is an old hand-made copy of the bot and has fallen
+behind it. Don't deploy it.
 
 ---
 
@@ -158,24 +171,24 @@ submit nothing on deadline day.
 
 ## Tuning
 
-All at the top of the file.
+All at the top of their sections in `fpl_bot_hybrid.py`. The backtest in
+[`backtest/`](backtest/) is where to check a change before making it.
 
 | Constant | Now | Meaning |
 |---|---|---|
 | `ACTION_WINDOW_HOURS` | 5 | How close to the deadline it decides |
-| `MIN_TRANSFER_GAIN` | 1.5 | Points per gameweek needed to bother. A *difference* between two players. |
-| `MAX_TRANSFERS_PER_GW` | 5 | Safety cap |
+| `FT_ROLL_VALUE` | 2.0 | Points a saved free transfer is worth; also the bar a free transfer must clear over the horizon |
+| `HIT_MARGIN` | 2.0 | Charged on top of each −4 hit |
 | `MAX_HITS_PER_GW` | 1 | Set to 0 to forbid point hits entirely |
-| `BENCH_BOOST_THRESHOLD` | 26.0 | A total, so it scales with squad score |
-| `TRIPLE_CAPTAIN_THRESHOLD` | 11.0 | Above a single-gameweek maximum, so it only fires in doubles |
+| `BENCH_WEIGHT` | 0.1 | Share of a bench player's score that counts when choosing the squad |
 | `FIXTURE_WEIGHTS` | `[1.0, .85, .7, .55, .4]` | Ownership horizon. `[1.0]` reverts to this gameweek only. |
-| `LLM_TEAM_NEWS_ENABLED` | `False` | `False` reports team news without acting on it |
+| `AUTO_PLAY_CHIPS` | `True` | `False` stops chips being played (advisory emails still recommend) |
+| `CHIP_THRESHOLDS` | TC 9, BB 13.3, FH 6, WC 13.5 | Projected gain at which each chip is played |
+| `LLM_TEAM_NEWS_ENABLED` | `True` | `False` reports team news without acting on it |
+| `GEMINI_MODELS` | 3.5-flash, 3.5-flash-lite, 3.1-flash-lite, 3.6-flash | Tried in order; retired, out-of-quota or busy models pass to the next |
 
-**Expect one recalibration.** These are tuned on pre-season data, where scores
-come entirely from last season. Between GW1 and GW6 the weighting shifts to
-FPL's own `ep_next`, which runs on a lower scale. The
-`[plan] Stopping: best remaining swap gains X` line in each email tells you how
-far off the threshold is.
+`MIN_TRANSFER_GAIN` only matters when PuLP is missing and the chained fallback
+planner runs.
 
 ---
 
@@ -191,7 +204,7 @@ record of where the numbers came from — don't put them in Lambda.
 
 - Tokens expire after 8 hours. Unavoidable without reverse-engineering the OAuth refresh flow.
 - The FPL API is unofficial. No contract, no versioning — as the login removal showed.
-- Advisory mode can't see your free transfer count, so it assumes one and never suggests a hit.
+- Advisory mode can't see your free transfer count, so it assumes one.
 - The model scores averages, so it can't tell a reliable six from a volatile one.
 - Price changes aren't modelled.
-- Chips are recommended, never played. Deliberate.
+- Chip thresholds were tuned in a simulator that can't see FPL's injury flags; live projections run on a similar but not identical scale.
