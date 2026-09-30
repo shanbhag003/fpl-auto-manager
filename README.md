@@ -66,17 +66,17 @@ fallback within about 1% of optimal, with a line in the log saying so. Same for
 publishing: a GitHub outage costs a chart, never a gameweek.
 
 **The LLM only ever lowers a rating.** Team news — rotation, a manager resting
-someone, a signing short of match fitness — is read by Claude with web search.
-It can reduce a player's projection, never raise it, so a wrong call costs at
-most one player rather than talking the bot into a bad buy. It runs in shadow
-mode until its judgement has been checked against a few gameweeks.
+someone, a signing short of match fitness — is read by Gemini with Google
+Search, on the free tier. It can reduce a player's projection, never raise it,
+so a wrong call costs at most one player rather than talking the bot into a bad
+buy. It ran in shadow mode for GW1–5 and has lowered ratings since GW6.
 
 ---
 
 ## Stack
 
 Python · pandas · PuLP (linear programming) · Pillow · AWS Lambda ·
-EventBridge · SSM Parameter Store · Claude API with web search ·
+EventBridge · SSM Parameter Store · Gemini API (free tier) with Google Search ·
 GitHub Pages · GitHub Actions
 
 The front end is one HTML file with no build step and no dependencies beyond

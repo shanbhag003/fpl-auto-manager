@@ -285,15 +285,19 @@ a real injury flag does that.
 not in the squad — all return an empty result and the bot proceeds exactly as it
 would without the layer.
 
-It also runs in **shadow mode** by default: it searches, reports in the email,
-and changes nothing. Everything else in this project was validated against
+It ran in **shadow mode** for GW1–5: it searched, reported in the email, and
+changed nothing. Everything else in this project was validated against
 historical data. This can't be — you'd need archived press conferences — so the
-only validation available is watching it for a few gameweeks and deciding
-whether you'd have agreed.
+only validation available was watching it. In those five weeks its one strong
+call (João Pedro, 0.75, knee injury) was right: he played no minutes. Its three
+misses were mild 0.2–0.3 flags on players who played 90. It has lowered
+ratings since GW6.
 
-Cost is controlled by searching per club rather than per player (15 players span
-about 8 clubs), a hard cap of three searches, a gate on deadline proximity, and
-a cooldown. About $0.05 a gameweek.
+It runs on Gemini's free tier with Google Search grounding (`GEMINI_API_KEY`),
+so it costs nothing. Claude with web search remains a paid fallback when only
+`ANTHROPIC_API_KEY` is set. Searching per club rather than per player (15
+players span about 8 clubs), a gate on deadline proximity and a cooldown keep
+it to a handful of searches a week.
 
 ---
 
