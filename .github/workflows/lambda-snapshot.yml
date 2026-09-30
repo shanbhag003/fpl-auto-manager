@@ -1,0 +1,55 @@
+name: Lambda snapshot
+
+# Downloads the handler code currently running on both Lambda functions, so the
+# repo can be brought in line with what is actually deployed. Manual only.
+#
+# The repo is public, so the files are scanned for anything that looks like a
+# credential first, and the artifact is kept for one day only. Environment
+# variables are never read — only the code.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-south-1
+
+      - name: Download deployed code
+        run: |
+          set -euo pipefail
+          mkdir -p snapshot
+          for fn in fpl-auto-manager fpl-results; do
+            handler=$(aws lambda get-function-configuration --function-name "$fn" --query Handler --output text)
+            url=$(aws lambda get-function --function-name "$fn" --query Code.Location --output text)
+            curl -sSfL "$url" -o "$fn.zip"
+            mkdir -p "snapshot/$fn"
+            unzip -q "$fn.zip" -d "snapshot/$fn"
+            echo "$handler" > "snapshot/$fn/HANDLER.txt"
+            echo "$fn: handler $handler"
+            (cd "snapshot/$fn" && find . -type f | sort)
+          done
+
+      - name: Refuse to publish anything that looks like a secret
+        run: |
+          hits=$(grep -rnIE 'ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|AKIA[0-9A-Z]{16}|(password|token|secret|api_key)\s*=\s*["'\''][^"'\'' ]{8,}' snapshot | cut -d: -f1,2 || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"   # file:line only, never the matched text
+            echo "::error::Possible hard-coded credential at the lines above. Not uploading. Move it to a Lambda environment variable first."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambda-snapshot
+          path: snapshot
+          retention-days: 1

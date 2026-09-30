@@ -1,0 +1,56 @@
+name: Deploy Lambda
+
+# Deploys fpl_bot_hybrid.py -> fpl-auto-manager and fpl_results.py -> fpl-results
+# whenever either changes on main. Runs in the `production` environment, so each
+# deploy waits for a manual approval in GitHub before anything reaches AWS.
+# See LAMBDA_DEPLOY.md for the one-time AWS setup.
+
+on:
+  push:
+    branches: [main]
+    paths: [fpl_bot_hybrid.py, fpl_results.py]
+  workflow_dispatch:
+    inputs:
+      function:
+        description: 'Which function to deploy'
+        type: choice
+        options: [both, fpl-auto-manager, fpl-results]
+        default: both
+      force:
+        description: 'Overwrite even if the deployed code was edited in the AWS console'
+        type: boolean
+        default: false
+
+concurrency: deploy-lambda
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write     # for the short-lived AWS login
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0    # the drift check compares against every past version
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - run: pip install --quiet boto3
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-south-1
+
+      - name: Deploy
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          CHOICE: ${{ inputs.function }}
+          FORCE: ${{ inputs.force }}
+        run: python .github/scripts/deploy_lambda.py
