@@ -24,7 +24,8 @@ conferences are already out.
 
 When it does act:
 
-1. Rates all ~600 players on expected points, for this week and for the next five
+1. Rates all ~600 players on expected points, for this week and for the next
+   five, counting an injured player only for the weeks he's expected back
 2. Reads the last four days of injury and team-news headlines for its squad's
    clubs, and lowers the rating of anyone they flag
 3. Plans every transfer in one optimisation: the best XI and captain over five
@@ -33,7 +34,8 @@ When it does act:
 5. Plays a chip when its projected gain clears a backtested threshold, and uses
    up any chip before its window closes
 6. Submits everything, then emails the reasoning with a shareable squad image
-7. Commits its projection for every player in the game, before a ball is kicked
+7. Commits its projection for every player in the game, and FPL's own, before a
+   ball is kicked
 
 A second job runs every six hours and fills in what actually happened, so the
 site shows live scores during a gameweek rather than waiting for it to end.
@@ -59,8 +61,16 @@ The simulator can't see FPL's injury flags, so the absolute totals run low. The
 gaps between rows are the point. The same backtest also ruled things *out*.
 Five LightGBM variants were better calibrated than the hand-built formula but
 worse at ranking the players you'd actually captain (6.6–6.9 vs 7.7 points a
-week), so the formula stays. Sweeping the optimiser's constants showed only
-noise, so they stay too.
+week), so the formula stays. So did a head-to-head with
+[PL Supercomputer](https://github.com/shanbhag003/pl-supercomputer), a
+Dixon-Coles match model within 0.9% of the betting market, on the same 85,000
+player-gameweeks:
+
+- Its FPL points model captained 0.9 points a week worse.
+- Its team-goal predictions, used as the fixture adjustment, did no better than
+  FPL's difficulty rating on seasons they weren't tuned on.
+
+Sweeping the optimiser's constants showed only noise, so they stay too.
 
 **Two scores, not one.** Who you *own* is a five-gameweek question, because
 transfers are scarce and a player is bought for a run of fixtures. Who *starts*
@@ -123,6 +133,12 @@ the proof. That's what makes the comparison on the site mean anything —
 including against a hand-picked human team whose squad isn't even public until
 after the deadline.
 
+The same file records FPL's own projection and chance of playing for every
+player, as published before that deadline. The public archives only keep a
+version written after the matches, which leaks the result. This is the honest
+record that the bot's 50% blend with FPL's projection will eventually be tested
+against.
+
 **It degrades instead of failing.** FPL retired the login endpoint this project
 depended on, mid-build. Rather than patch around it, the system was rebuilt so
 that being unable to sign in produces a different outcome, not a failed one.
@@ -166,7 +182,7 @@ fpl_bot_hybrid.py          the bot (Lambda: fpl-auto-manager)
 fpl_results.py             fills in actual points; second Lambda (fpl-results), every 6h
 index.html                 the public site, served by GitHub Pages
 data/season.json           every gameweek: squads, projections, results
-data/projections/          per-gameweek projections, write-once
+data/projections/          per-gameweek projections, ours and FPL's, write-once
 backtest/                  replays past seasons: model comparison, tuning, season simulator
 tools/check_news.py        runs the team-news check locally on the squad
 make_card.py               renders a gameweek share card (Share card workflow)
