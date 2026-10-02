@@ -107,6 +107,15 @@ FPL already flags the same injury, the lower of the two estimates is used
 rather than both. In its first live check it caught two injuries FPL hadn't
 flagged yet.
 
+**An injury is about the weeks it lasts, not the whole horizon.** FPL's flags
+describe the next match. The ownership score now reads return dates from FPL's
+injury notes ("Expected back 18 Oct", "Suspended until 25 Oct"), and values a
+flagged player for the share of the next five weeks he's available. This rule
+comes from [PL Supercomputer](https://github.com/shanbhag003/pl-supercomputer).
+Before, a player back next week looked as worthless to own as one out for the
+season. Only players with no return date, or who have left, still count as
+gone.
+
 **The predictions are published before kickoff, and can't be edited after.**
 Every gameweek, a projection for every player is committed to this repository
 before the deadline, and the file is never rewritten. The commit timestamp is

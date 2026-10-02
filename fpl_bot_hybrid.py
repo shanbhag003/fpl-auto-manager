@@ -835,6 +835,10 @@ def estimate_base_points(players_df, gameweek):
               "lineup uses the blended figure")
         start_prob_recent = start_prob
 
+    # Before FPL's chance of playing: the ownership view applies availability
+    # week by week over the horizon instead (see horizon_availability).
+    history_estimate_healthy = quality * start_prob.clip(0.0, 1.0)
+
     start_prob = (start_prob * avail).clip(0.0, 1.0)
     start_prob_now_view = (start_prob_recent * avail).clip(0.0, 1.0)
 
@@ -867,7 +871,9 @@ def estimate_base_points(players_df, gameweek):
           f"last-season snapshot.")
     # base drives score_run (who to own); base_now drives score_now
     # (who starts this week). They differ only in start probability.
-    return base, base_now
+    # history_estimate_healthy is base without FPL's availability, for
+    # flagged players whose absence is spread over the horizon instead.
+    return base, base_now, history_estimate_healthy
 
 
 
@@ -915,6 +921,71 @@ def fixture_outlook(fixtures_all, gameweek, weights=None):
     return {t: outlook[t] / totals[t] for t in outlook if totals.get(t)}
 
 
+# Gameweeks an injured / suspended player misses when FPL gives no return date
+# (from PL Supercomputer's fpl_live.py). 'd' is only doubtful for the next one.
+MISSED_WITHOUT_DATE = {'i': 6, 's': 2, 'd': 0}
+
+
+def return_date(news, today):
+    """'Knee injury - Expected back 18 Oct' / 'Suspended until 25 Oct' -> date."""
+    import re
+    m = re.search(r'(?:[Ee]xpected back|[Uu]ntil) (\d{1,2}) ([A-Z][a-z]{2})', news or '')
+    if not m:
+        return None
+    try:
+        d = datetime.strptime(f'{m.group(1)} {m.group(2)} {today.year}', '%d %b %Y').date()
+    except ValueError:
+        return None
+    # "18 Jan" read in December means next January
+    return d if d >= today - timedelta(days=60) else d.replace(year=today.year + 1)
+
+
+def horizon_availability(players_df, bootstrap_data, gameweek):
+    """Each player's availability over the ownership horizon, 0..1.
+
+    Per gameweek: 0 for players who have left (u/n); with a return date in
+    FPL's news, available from that date; otherwise FPL's chance of playing
+    for the next gameweek and MISSED_WITHOUT_DATE after it. Weighted like the
+    fixture view (FIXTURE_WEIGHTS), so a player back in a fortnight keeps
+    most of his value as someone to own.
+    """
+    weights = FIXTURE_WEIGHTS[:FIXTURE_HORIZON]
+    deadlines = {}
+    for e in bootstrap_data.get('events', []):
+        try:
+            deadlines[int(e['id'])] = datetime.fromisoformat(
+                str(e['deadline_time']).replace('Z', '+00:00')).date()
+        except (KeyError, TypeError, ValueError):
+            pass
+    today = datetime.now(timezone.utc).date()
+    first = deadlines.get(gameweek, today)
+    days = [deadlines.get(gameweek + k, first + timedelta(days=7 * k))
+            for k in range(len(weights))]
+
+    out = []
+    for r in players_df.itertuples():
+        status = getattr(r, 'status', 'a')
+        chance = getattr(r, 'chance_of_playing_next_round', None)
+        if status in ('u', 'n'):
+            out.append(0.0)
+            continue
+        if status == 'a' and (chance is None or pd.isna(chance) or chance >= 100):
+            out.append(1.0)
+            continue
+        back = return_date(getattr(r, 'news', ''), today)
+        total = 0.0
+        for k, (w, day) in enumerate(zip(weights, days)):
+            if back is not None:
+                a = 1.0 if day >= back else 0.0
+            elif k == 0 and chance is not None and not pd.isna(chance):
+                a = float(chance) / 100
+            else:
+                a = 0.0 if k < MISSED_WITHOUT_DATE.get(status, 0) else 1.0
+            total += w * a
+        out.append(total / sum(weights))
+    return pd.Series(out, index=players_df.index)
+
+
 def get_data(bootstrap_data, gameweek):
     players_df = pd.DataFrame(bootstrap_data['elements'])
     teams_df = pd.DataFrame(bootstrap_data['teams'])
@@ -955,7 +1026,7 @@ def get_data(bootstrap_data, gameweek):
         players_df['diff'] = players_df['diff'].fillna(0)
         players_df['fixture_count'] = players_df['fixture_count'].fillna(0)  # 0 = blank gameweek
 
-    players_df['base_points'], players_df['base_points_now'] = \
+    players_df['base_points'], players_df['base_points_now'], base_healthy = \
         estimate_base_points(players_df, gameweek)
 
     # Forward-looking fixture term, replacing the old single-gameweek one.
@@ -1005,9 +1076,28 @@ def get_data(bootstrap_data, gameweek):
         players_df['base_points_now'] * players_df['fixture_count'] * mult_now
         + penalty)
 
+    # Ownership view of flagged players: FPL's flag is about the NEXT match,
+    # but the -50 penalty and the chance of playing used to apply to all five
+    # weeks, so a player back next week looked worthless to own. Instead, his
+    # healthy rating is scaled by the share of the horizon he is available
+    # for, and the penalty stays only for players out for all of it.
+    avail_run = horizon_availability(players_df, bootstrap_data, gameweek)
+    chance = pd.to_numeric(players_df.get('chance_of_playing_next_round'), errors='coerce')
+    flagged = (players_df['status'] != 'a') | (chance.fillna(100) < 100)
+    players_df['avail_run'] = avail_run
+    players_df['base_points'] = players_df['base_points'].where(
+        ~flagged, base_healthy * avail_run)
+    players_df['penalty_run'] = penalty.where(
+        (avail_run <= 0) | players_df['status'].isin(['u', 'n']), 0.0)
+    n_back = int((flagged & (avail_run > 0) & (penalty < 0)).sum())
+    if n_back:
+        print(f"[availability] {n_back} injured/suspended player(s) due back within "
+              f"{FIXTURE_HORIZON} gameweeks; owned for the weeks they're available")
+
     mult_run = (1.0 + players_df['fixture_ease'] * FIXTURE_SCALE).clip(0.8, 1.2)
     players_df['score_run'] = (
-        players_df['base_points'] * players_df['avg_fixtures'] * mult_run + penalty)
+        players_df['base_points'] * players_df['avg_fixtures'] * mult_run
+        + players_df['penalty_run'])
 
     # `score` stays as the ownership view, so everything that selects a squad
     # keeps working unchanged. Lineup code asks for score_now explicitly.
@@ -3628,7 +3718,7 @@ def apply_minutes_risk(players_df, risks):
         df['score_now'] = (df.get('base_points_now', df['base_points'])
                            * df['fixture_count'] * mult_now + penalty)
         df['score_run'] = (df['base_points'] * df['avg_fixtures']
-                           * mult_run + penalty)
+                           * mult_run + df.get('penalty_run', penalty))
         df['score'] = df['score_run']
     else:
         df['score'] = (df['base_points'] * df['fixture_count']
@@ -3917,18 +4007,26 @@ def write_projections(gameweek, players_df):
         print(f"[snapshot] projections for GW{gameweek} already frozen — not rewriting.")
         return
 
-    scores = {}
+    scores, fpl = {}, {}
     for r in players_df.itertuples():
         now = _num(getattr(r, 'score_now', None))
         run = _num(getattr(r, 'score_run', None))
         if now is None and run is None:
             continue
         scores[str(int(r.id))] = [now, run]
+        # FPL's own projection and chance of playing, as published before this
+        # deadline. The archived ones were recorded after the matches
+        # (backtest/README.md), so this is the only honest record of them, and
+        # what the ep_next blend weight can eventually be tested against.
+        ep = _num(getattr(r, 'ep_next', None))
+        chance = getattr(r, 'chance_of_playing_next_round', None)
+        fpl[str(int(r.id))] = [ep, None if chance is None or pd.isna(chance) else int(chance)]
 
     gh_write(path,
              {'gw': int(gameweek),
               'written_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
-              'scores': scores},
+              'scores': scores,
+              'fpl': fpl},     # [ep_next, chance_of_playing_next_round] per player
              f'GW{gameweek}: freeze projections for {len(scores)} players')
 
 
