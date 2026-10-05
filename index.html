@@ -254,6 +254,33 @@ svg{display:block;width:100%;height:auto;overflow:visible}
   justify-content:space-between;gap:14px;flex-wrap:wrap}
 .foot .eyebrow{font-size:10px}
 
+/* squad lookup — someone else's team, so it is set apart from the bot's */
+.lookup{border-color:rgba(255,194,77,.32);margin-top:8px}
+.lookup[open] summary{color:var(--amber)}
+.lbody{padding:18px 16px 20px}
+.lform{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 6px}
+.lform input{flex:1 1 180px;min-width:0;min-height:44px;padding:0 14px;border-radius:10px;
+  border:1px solid var(--line);background:rgba(0,0,0,.25);color:var(--white);
+  font-family:var(--mono);font-size:16px;letter-spacing:.04em}
+.lform input:focus{outline:none;border-color:rgba(255,194,77,.6)}
+.lform button{min-height:44px;padding:0 18px;border-radius:10px;font-weight:600;
+  background:var(--amber);color:#1A1200}
+.lform button:disabled{opacity:.55;cursor:default}
+.lhint{font-size:12px;color:var(--lavd)}
+.lhint code{font-family:var(--mono);color:var(--lav)}
+.lmsg{margin-top:14px}
+.lmsg.err{border-color:rgba(255,93,122,.4);color:var(--rose)}
+.lres{margin-top:18px}
+.lres .head{margin-bottom:16px}
+.lres .head h2{font-size:clamp(24px,5vw,34px)}
+.lfacts{display:grid;gap:9px;margin-bottom:18px}
+.lfact{padding:12px 14px;border:1px solid var(--line);border-radius:11px;background:var(--card);
+  font-size:13.5px;color:var(--lav)}
+.lfact .k{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--lavd);margin-bottom:4px}
+.lfact b{color:var(--white);font-weight:600}
+.lfact .good{color:var(--mint)} .lfact .warn{color:var(--amber)}
+
 .state{padding:70px 20px;text-align:center;color:var(--lav)}
 .state h3{font-family:var(--display);font-size:24px;font-weight:700;color:var(--white);margin-bottom:10px}
 .state code{font-family:var(--mono);font-size:12px;background:var(--card);
@@ -346,6 +373,8 @@ svg{display:block;width:100%;height:auto;overflow:visible}
       <div class="strip" id="strip"></div>
     </div>
     <div id="view"><div class="state"><h3>Loading…</h3></div></div>
+    <div id="lookup"></div>
+    <div id="footer"></div>
   </main>
 
 </div>
@@ -366,6 +395,11 @@ const ANALYTICS = {
   clarity:    'y7gd4gcp8g',   // 'abcdefghij'        Microsoft Clarity
   cfBeacon:   '',   // '{token}'           Cloudflare Web Analytics
 };
+
+/* Squad lookup. FPL's API can't be read from the browser (no CORS header), so
+   the lookup goes through the fpl-proxy Lambda — see DEPLOY.md. While this is
+   empty the lookup is not shown at all and the page is otherwise unchanged. */
+const PROXY_BASE = '';   // Lambda Function URL, e.g. https://xxxx.lambda-url.ap-south-1.on.aws
 
 function loadAnalytics(){
   if(ANALYTICS.ga4){
@@ -482,6 +516,9 @@ async function init(){
 
   renderTally();
   renderNav();
+  if(PROXY_BASE) renderLookup();
+  // Outside the gameweek view, so it stays last when the lookup is shown.
+  $('#footer').appendChild(foot());
 
   track('site_load', {
     gameweeks: gws.length,
@@ -601,7 +638,6 @@ function render(g){
   v.appendChild(transfers(g));
   if(g.news?.length) v.appendChild(news(g));
   v.appendChild(chart());
-  v.appendChild(foot());
 }
 
 // Shared y-axis for the points bars: the squad's best return, floored at 10
@@ -976,6 +1012,208 @@ function foot(){
   f.innerHTML=`<div class="eyebrow">Autonomous FPL System</div>
     <div class="eyebrow dim">${from?`Projections from GW${from} · `:''}Python · Linear programming · AWS Lambda</div>`;
   return f;
+}
+
+/* ---------- score your own team ------------------------------------------
+   Everything shown comes from files committed before kickoff: the frozen
+   projections (data/projections/gw{n}.json) and player metadata
+   (data/players.json). The browser only looks numbers up and compares them —
+   it never computes a projection. */
+const UPGRADE_BUDGET = 20;         // tenths of £m: the bank and selling prices aren't public
+const POS_NAMES = {GK:'goalkeeper', DEF:'defender', MID:'midfielder', FWD:'forward'};
+const CHIP_NAMES = {bboost:'Bench Boost', '3xc':'Triple Captain', freehit:'Free Hit',
+                    wildcard:'Wildcard', manager:'Assistant Manager'};
+const lookupCache = {};
+
+class LookupError extends Error {
+  constructor(reason, message){ super(message); this.reason = reason; }
+}
+
+function renderLookup(){
+  const d = document.createElement('details');
+  d.className = 'guide lookup';
+  d.addEventListener('toggle', () => { if(d.open) track('lookup_open', {}); });
+  const sum = el('summary');
+  sum.innerHTML = 'Score your own team <span class="chev">⌄</span>';
+  d.appendChild(sum);
+
+  const body = el('div','lbody');
+  body.innerHTML = `
+    <p class="gintro">Not the bot&rsquo;s team: <b>yours</b>. Enter an FPL entry ID and
+      see how the model rated that squad, using the projections it committed
+      before kickoff.</p>
+    <form class="lform" novalidate>
+      <input id="lid" inputmode="numeric" autocomplete="off" maxlength="10"
+        placeholder="Entry ID, e.g. 2673853" aria-label="FPL entry ID">
+      <button type="submit">Score my team</button>
+    </form>
+    <div class="lhint">It&rsquo;s the number in the address of your FPL Points page:
+      <code>…/entry/<b>1234567</b>/event/6</code></div>
+    <div id="lout" aria-live="polite"></div>`;
+  d.appendChild(body);
+  $('#lookup').appendChild(d);
+
+  const input = $('#lid', body), form = $('form', body);
+  try { input.value = localStorage.getItem('fpl-lookup-id') || ''; } catch(e) {}
+  form.addEventListener('submit', ev => { ev.preventDefault(); lookup(input.value.trim()); });
+}
+
+async function lookupJSON(url, notFound){
+  let r;
+  try { r = await fetch(url); }
+  catch(e) { throw new LookupError('network',
+    'Couldn’t reach the lookup service. Check your connection, or try again in a minute.'); }
+  if(r.status === 404 && notFound) throw new LookupError(notFound[0], notFound[1]);
+  if(r.status === 503) throw new LookupError('fpl_updating',
+    'FPL is updating its data right now. Try again in a few minutes.');
+  if(!r.ok) throw new LookupError('http_'+r.status,
+    'The lookup service returned an error ('+r.status+'). Try again shortly.');
+  try { return await r.json(); }
+  catch(e) { throw new LookupError('bad_json', 'The lookup service sent something unreadable.'); }
+}
+
+async function cachedJSON(url, notFound){
+  if(!(url in lookupCache)) lookupCache[url] = lookupJSON(url, notFound)
+    .catch(e => { delete lookupCache[url]; throw e; });
+  return lookupCache[url];
+}
+
+async function lookup(raw){
+  const out = $('#lout'), btn = $('.lform button');
+  track('lookup_submitted', {});
+  const fail = e => {
+    const reason = e instanceof LookupError ? e.reason : 'unexpected';
+    const msg = e instanceof LookupError ? e.message : 'Something went wrong. Try again.';
+    out.innerHTML = '';
+    out.appendChild(el('div','plain lmsg err', esc(msg)));
+    track('lookup_error', {reason});
+  };
+  if(!/^\d{1,10}$/.test(raw) || +raw < 1)
+    return fail(new LookupError('invalid_id', 'An entry ID is a whole number, like 2673853.'));
+  try { localStorage.setItem('fpl-lookup-id', raw); } catch(e) {}
+
+  btn.disabled = true;
+  out.innerHTML = '';
+  out.appendChild(el('div','plain lmsg','Looking up entry '+esc(raw)+'…'));
+  try {
+    const entry = await lookupJSON(`${PROXY_BASE}/entry/${raw}/`,
+      ['not_found', 'There’s no FPL team with ID '+raw+'.']);
+    const gw = entry.current_event;
+    if(!gw) throw new LookupError('no_gameweek', 'This team hasn’t played a gameweek yet this season.');
+
+    const [picks, proj, meta] = await Promise.all([
+      lookupJSON(`${PROXY_BASE}/entry/${raw}/event/${gw}/picks/`,
+        ['picks_not_public', `GW${gw} picks aren’t public yet. FPL publishes each team after the deadline.`]),
+      cachedJSON(`data/projections/gw${gw}.json`,
+        ['no_projections', `The model didn’t publish projections for GW${gw}, so there’s nothing honest to score this team against.`]),
+      cachedJSON('data/players.json',
+        ['no_players', 'The player list hasn’t been published yet. Try again later.']),
+    ]);
+    if(proj.partial) throw new LookupError('partial_projections',
+      `GW${gw}’s projections only cover the bot’s own 15 players (they were rebuilt from the emailed poster), so other squads can’t be scored for that week.`);
+
+    out.innerHTML = '';
+    out.appendChild(lookupResult(entry, gw, picks, proj, meta.players || {}));
+    track('lookup_success', {gw});
+  } catch(e) { fail(e); }
+  finally { btn.disabled = false; }
+}
+
+function lookupResult(entry, gw, picks, proj, players){
+  const scores = proj.scores || {};
+  // A flagged injury carries a -50 penalty in the bot's internals; shown as 0.
+  const now = id => { const s = scores[id]; return s && s[0]!=null ? Math.max(0, s[0]) : null; };
+  const run = id => { const s = scores[id]; return s && s[1]!=null ? Math.max(0, s[1]) : null; };
+
+  const squad = (picks.picks||[]).slice().sort((a,b)=>a.position-b.position).map(p => {
+    const m = players[p.element] || ['#'+p.element, '', '', 0];
+    return {id:p.element, name:m[0], pos:m[1], team:m[2], cost:m[3],
+            role: p.position<=11 ? 'xi' : 'bench', bench_order: p.position<=11 ? null : p.position-11,
+            multiplier:p.multiplier, projected_now: now(p.element), actual:null, pending:false};
+  });
+  const cap = (picks.picks||[]).find(p=>p.is_captain), vice = (picks.picks||[]).find(p=>p.is_vice_captain);
+  const g = {gw, bot:{squad, captain: cap?.element, vice: vice?.element}};
+  const xi = squad.filter(p=>p.role==='xi');
+  const missing = squad.filter(p=>p.projected_now==null).length;
+
+  const w = el('div','lres');
+  const head = el('div','head');
+  const frozen = proj.written_at ? fmt(proj.written_at) : null;
+  head.innerHTML = `<div class="eyebrow" style="color:var(--amber)">Your team · not the bot&rsquo;s</div>
+    <h2>${esc(entry.name || 'Entry '+entry.id)}</h2>
+    <p>GW${gw}, scored with the projections the model committed${frozen?` on ${esc(frozen)}`:''},
+      before kickoff. They&rsquo;re the model&rsquo;s view, not a forecast of your actual score.</p>`;
+  const flags = el('div','flags');
+  flags.append(pill('GW'+gw+' projections'));
+  if(picks.active_chip) flags.append(pill((CHIP_NAMES[picks.active_chip]||picks.active_chip)+' played','live'));
+  if(missing) flags.append(pill(missing+' player(s) not in the projections','live'));
+  head.appendChild(flags);
+  w.appendChild(head);
+
+  // The model's total: each pick's projection times FPL's multiplier for it,
+  // so the captain counts double (triple with Triple Captain) and the bench
+  // counts only under Bench Boost.
+  const total = squad.reduce((t,p)=>t+(p.projected_now??0)*p.multiplier, 0);
+  const capRow = squad.find(p=>p.id===cap?.element);
+  const best = xi.filter(p=>p.projected_now!=null).sort((a,b)=>b.projected_now-a.projected_now)[0];
+  const weakest = xi.filter(p=>p.projected_now!=null).sort((a,b)=>a.projected_now-b.projected_now)[0];
+
+  const v = el('div','verdict');
+  v.appendChild(cell('bot','Model total', n1(total),
+    'projection for your XI, captain '+(picks.active_chip==='3xc'?'tripled':'doubled')));
+  v.appendChild(cell('human','Weakest starter', weakest ? n1(weakest.projected_now) : '–',
+    weakest ? weakest.name+' · '+(weakest.team||'') : 'no projections'));
+  v.appendChild(cell('proj','Captain', capRow ? n1(capRow.projected_now) : '–',
+    capRow ? capRow.name : 'none set'));
+  w.appendChild(v);
+
+  const facts = el('div','lfacts');
+  if(capRow && best){
+    facts.appendChild(el('div','lfact', (capRow.id===best.id || capRow.projected_now>=best.projected_now)
+      ? `<span class="k">Captain check</span><span class="good">The model agrees.</span>
+         <b>${esc(capRow.name)}</b> had the highest projection in your XI (${n1(capRow.projected_now)}).`
+      : `<span class="k">Captain check</span><span class="warn">The model would have captained
+         <b>${esc(best.name)}</b></span> (${n1(best.projected_now)}) over <b>${esc(capRow.name)}</b>
+         (${n1(capRow.projected_now)}).`));
+  }
+  facts.appendChild(el('div','lfact', upgradeText(squad, players, run)));
+  w.appendChild(facts);
+
+  w.appendChild(pitch(g, false));
+  w.appendChild(bench(g, false));
+  return w;
+}
+
+// Best single swap on the bot's 5-week ownership score, within the owned
+// player's current price + £2.0m, same position, at most 3 per club.
+function upgradeText(squad, players, run){
+  const owned = new Set(squad.map(p=>String(p.id)));
+  const clubs = {};
+  squad.forEach(p=>{ clubs[p.team]=(clubs[p.team]||0)+1; });
+  let top = null;
+  squad.forEach(out=>{
+    const base = run(out.id);
+    if(base==null) return;
+    for(const id in players){
+      if(owned.has(id)) continue;
+      const [name,pos,club,cost] = players[id];
+      if(pos!==out.pos || cost>out.cost+UPGRADE_BUDGET) continue;
+      if(club!==out.team && (clubs[club]||0)>=3) continue;
+      const r = run(id);
+      if(r==null) continue;
+      const gain = r-base;
+      if(!top || gain>top.gain) top = {gain, out, name, club, cost};
+    }
+  });
+  const k = `<span class="k">Best affordable upgrade · next five gameweeks</span>`;
+  const note = `<div class="lhint" style="margin-top:6px">Assumes up to ${money(UPGRADE_BUDGET)} more than
+    the outgoing player&rsquo;s current price: your bank and selling prices aren&rsquo;t public.
+    Ranked on the model&rsquo;s five-week score, which is what the bot uses for its own transfers.</div>`;
+  if(!top || top.gain<=0.05)
+    return k+`No single swap within that budget beats your current players on the model&rsquo;s five-week view.`+note;
+  return k+`<b>${esc(top.out.name)}</b> → <b class="good">${esc(top.name)}</b>
+    (${esc(top.club)}, ${money(top.cost)}): <span class="good">+${n1(top.gain)}</span> a week on the
+    five-week projection.`+note;
 }
 
 function ago(iso){

@@ -349,6 +349,26 @@ def build_uninstrumented_record(gw, event, elements, live, bot_tf,
     }
 
 
+def write_players(elements):
+    """data/players.json: name, position, club and price for every player.
+
+    The squad lookup on the site needs these alongside the projections, which
+    carry ids only. Committed only when something in it changed (prices move a
+    few times a week), so the history isn't flooded with identical commits.
+    """
+    players = {str(pid): [e['web_name'], POS.get(e['element_type'], ''),
+                          e['short'], e['now_cost']]
+               for pid, e in sorted(elements.items())}
+    existing, sha = gh_read('data/players.json')
+    if existing is not None and existing.get('players') == players:
+        print("[players] unchanged — skipping the commit.")
+        return
+    gh_write('data/players.json',
+             {'updated': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+              'players': players},
+             f"players: {len(players)} players", sha)
+
+
 def run():
     if not LOCAL and not (GITHUB_REPO and GITHUB_TOKEN):
         raise RuntimeError("Set LOCAL_DATA=1 for filesystem mode, "
@@ -365,6 +385,13 @@ def run():
             'team_id': int(e['team']),
         }
     events = {int(ev['id']): ev for ev in boot['events']}
+
+    # Player metadata for the site's squad lookup. Separate from season.json,
+    # and never allowed to stop the results pass.
+    try:
+        write_players(elements)
+    except Exception as e:
+        print(f"[players] skipped: {type(e).__name__}: {e}")
 
     # Every gameweek whose deadline has passed, not just the settled ones.
     # A gameweek is only marked `final` once FPL has finished CHECKING it —
