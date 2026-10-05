@@ -20,12 +20,18 @@ import urllib.request
 import zipfile
 
 import boto3
+from botocore.exceptions import ClientError
 
 # Lambda function name -> source file in this repo
 FUNCTIONS = {
     'fpl-auto-manager': 'fpl_bot_hybrid.py',
     'fpl-results': 'fpl_results.py',
+    'fpl-proxy': 'proxy_lambda.py',
 }
+# Functions that may not exist yet. Until one is created in the console (and
+# the deploy role allowed to update it), its deploy is skipped with a notice
+# rather than failing the whole run. See DEPLOY.md.
+OPTIONAL = {'fpl-proxy'}
 ZERO_SHA = '0' * 40
 
 
@@ -52,8 +58,8 @@ def known_versions(path):
 def targets():
     event = os.environ.get('EVENT')
     if event == 'workflow_dispatch':
-        choice = os.environ.get('CHOICE') or 'both'
-        return list(FUNCTIONS) if choice == 'both' else [choice]
+        choice = os.environ.get('CHOICE') or 'all'
+        return list(FUNCTIONS) if choice in ('all', 'both') else [choice]
 
     before = os.environ.get('BEFORE') or ZERO_SHA
     if before == ZERO_SHA:
@@ -70,7 +76,14 @@ def deploy(client, name, path, force):
     py_compile.compile(path, doraise=True)
     source = open(path, 'rb').read()
 
-    fn = client.get_function(FunctionName=name)
+    try:
+        fn = client.get_function(FunctionName=name)
+    except ClientError as e:
+        code = e.response.get('Error', {}).get('Code')
+        if name in OPTIONAL and code in ('ResourceNotFoundException', 'AccessDeniedException'):
+            print(f"::notice::{name} isn't set up yet ({code}) — skipped. See DEPLOY.md.")
+            return
+        raise
     handler = fn['Configuration']['Handler']            # e.g. lambda_function.lambda_handler
     module, func = handler.rsplit('.', 1)
     entry = module.replace('.', '/') + '.py'

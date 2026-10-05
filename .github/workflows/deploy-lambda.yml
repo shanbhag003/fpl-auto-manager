@@ -1,21 +1,21 @@
 name: Deploy Lambda
 
-# Deploys fpl_bot_hybrid.py -> fpl-auto-manager and fpl_results.py -> fpl-results
-# whenever either changes on main. Runs in the `production` environment, so each
+# Deploys fpl_bot_hybrid.py -> fpl-auto-manager, fpl_results.py -> fpl-results
+# and proxy_lambda.py -> fpl-proxy whenever one changes on main. Runs in the `production` environment, so each
 # deploy waits for a manual approval in GitHub before anything reaches AWS.
 # See LAMBDA_DEPLOY.md for the one-time AWS setup.
 
 on:
   push:
     branches: [main]
-    paths: [fpl_bot_hybrid.py, fpl_results.py]
+    paths: [fpl_bot_hybrid.py, fpl_results.py, proxy_lambda.py]
   workflow_dispatch:
     inputs:
       function:
         description: 'Which function to deploy'
         type: choice
-        options: [both, fpl-auto-manager, fpl-results]
-        default: both
+        options: [all, fpl-auto-manager, fpl-results, fpl-proxy]
+        default: all
       force:
         description: 'Overwrite even if the deployed code was edited in the AWS console'
         type: boolean

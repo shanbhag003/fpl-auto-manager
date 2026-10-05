@@ -179,16 +179,20 @@ the console. [LAMBDA_DEPLOY.md](LAMBDA_DEPLOY.md) has the one-time AWS setup.
 
 ```
 fpl_bot_hybrid.py          the bot (Lambda: fpl-auto-manager)
-fpl_results.py             fills in actual points; second Lambda (fpl-results), every 6h
+fpl_results.py             fills in actual points and data/players.json; Lambda fpl-results, every 6h
+proxy_lambda.py            read-only proxy for the site's squad lookup; Lambda fpl-proxy
 index.html                 the public site, served by GitHub Pages
 data/season.json           every gameweek: squads, projections, results
 data/projections/          per-gameweek projections, ours and FPL's, write-once
+data/players.json          names, positions, clubs and prices for the squad lookup
 backtest/                  replays past seasons: model comparison, tuning, season simulator
 tools/check_news.py        runs the team-news check locally on the squad
 make_card.py               renders a gameweek share card (Share card workflow)
 .github/workflows/         Deploy Lambda, Lambda snapshot, Share card, Seed GW1
 SETUP.md                   deployment guide for the bot
 LAMBDA_DEPLOY.md           GitHub → Lambda deploys and their AWS setup
+DEPLOY.md                  the site and the squad-lookup proxy
+SCHEMA.md                  the data files the site reads: the contract between the two sides
 HOW_IT_WORKS.md            the modelling and design decisions
 collect_preseason.py       one-off data collection, already run
 collect_established.py     one-off data collection, already run

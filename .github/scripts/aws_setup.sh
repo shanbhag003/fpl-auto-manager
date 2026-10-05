@@ -41,7 +41,8 @@ cat > /tmp/perms.json <<EOF
     "Action": ["lambda:GetFunction", "lambda:GetFunctionConfiguration", "lambda:UpdateFunctionCode"],
     "Resource": [
       "arn:aws:lambda:${REGION}:${ACCOUNT}:function:fpl-auto-manager",
-      "arn:aws:lambda:${REGION}:${ACCOUNT}:function:fpl-results"
+      "arn:aws:lambda:${REGION}:${ACCOUNT}:function:fpl-results",
+      "arn:aws:lambda:${REGION}:${ACCOUNT}:function:fpl-proxy"
     ]
   }]
 }
