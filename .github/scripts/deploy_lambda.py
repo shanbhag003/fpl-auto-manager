@@ -55,6 +55,16 @@ def known_versions(path):
     return versions
 
 
+def is_aws_placeholder(code):
+    """The 'Hello from Lambda!' handler AWS puts in a new function.
+
+    Nothing to lose by replacing it, so it isn't treated as a console edit.
+    Anything longer, or that changed it, still is.
+    """
+    text = code.decode('utf-8', 'replace')
+    return 'Hello from Lambda!' in text and len(text.strip().splitlines()) <= 12
+
+
 def targets():
     event = os.environ.get('EVENT')
     if event == 'workflow_dispatch':
@@ -100,7 +110,9 @@ def deploy(client, name, path, force):
         print(f"{name}: already running this version of {path}.")
         return
 
-    if deployed is not None and normalise(deployed) not in known_versions(path):
+    if deployed is not None and is_aws_placeholder(deployed):
+        print(f"{name}: replacing AWS's starter code (a newly created function).")
+    elif deployed is not None and normalise(deployed) not in known_versions(path):
         msg = (f"{name}: the deployed {entry} doesn't match any version of {path} in git, "
                f"so it was probably edited in the AWS console. Run the 'Lambda snapshot' "
                f"workflow and bring those changes into the repo first.")
