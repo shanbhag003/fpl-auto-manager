@@ -79,8 +79,13 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 }
 .tally-row .who{font-family:var(--mono);font-size:var(--t-2xs);letter-spacing:.12em;text-transform:uppercase;color:var(--lavd)}
 .tally-row .pts{font-family:var(--display);font-size:var(--t-xl);font-weight:700}
-.tally-row.lead{border-color:rgba(0,255,135,.35);background:rgba(0,255,135,.07)}
-.tally-row.lead .pts{color:var(--mint)}
+.tally-row.bot{border-color:rgba(0,255,135,.35);background:rgba(0,255,135,.07)}
+.tally-row.bot .pts{color:var(--mint)}
+.tally-row.human .pts{color:var(--lav)}
+/* colour says who it is (bot = mint, as in the tabs and chart); this says who leads */
+.leads{display:inline-block;margin-top:var(--s1);font-family:var(--mono);font-size:var(--t-3xs);
+  font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--white);
+  padding:1px 6px;border-radius:999px;background:rgba(255,255,255,.1)}
 
 .gwlist{display:grid;gap:4px}
 .gwbtn{
@@ -357,10 +362,11 @@ svg{display:block;width:100%;height:auto;overflow:visible}
   .mobilebar h1{font-family:var(--display);font-size:var(--t-md);font-weight:700}
   .mtally{display:flex;gap:var(--s2);margin-bottom:var(--s4)}
   .mtally .t{flex:1;padding:var(--s2) var(--s3);border-radius:10px;background:var(--card);border:1px solid var(--line)}
-  .mtally .t.lead{border-color:rgba(0,255,135,.35);background:rgba(0,255,135,.07)}
+  .mtally .t.bot{border-color:rgba(0,255,135,.35);background:rgba(0,255,135,.07)}
   .mtally .who{font-family:var(--mono);font-size:var(--t-2xs);letter-spacing:.11em;text-transform:uppercase;color:var(--lavd)}
   .mtally .pts{font-family:var(--display);font-size:var(--t-xl);font-weight:700}
-  .mtally .t.lead .pts{color:var(--mint)}
+  .mtally .t.bot .pts{color:var(--mint)}
+  .mtally .t.human .pts{color:var(--lav)}
   .strip{display:flex;gap:6px;overflow-x:auto;padding-bottom:5px;
     scrollbar-width:none;-webkit-overflow-scrolling:touch}
   .strip::-webkit-scrollbar{display:none}
@@ -715,15 +721,19 @@ function renderTally(){
     ['bot', e.bot?.name || 'Bot', b, t.bot?.overall_rank],
     ['human', e.human?.name || 'Hand-picked', h, t.human?.overall_rank],
   ];
+  // Colour is identity, never the lead: the bot is mint everywhere on the page.
+  const leader = b > h ? 'bot' : h > b ? 'human' : null;
+  const leads = k => leader===k ? `<span class="leads">Leads by ${Math.abs(b-h)}</span>` : '';
   $('#tally').innerHTML = rows.map(([k,name,pts,rank])=>`
-    <div class="tally-row ${(k==='bot'?b>=h:h>b)?'lead':''}">
+    <div class="tally-row ${k}">
       <div><div class="who">${esc(name)}</div>
-      ${rank?`<div style="font-family:var(--mono);font-size:10px;color:var(--lavd);margin-top:2px">OR ${rank.toLocaleString()}</div>`:''}</div>
+      ${rank?`<div style="font-family:var(--mono);font-size:10px;color:var(--lavd);margin-top:2px">OR ${rank.toLocaleString()}</div>`:''}
+      ${leads(k)}</div>
       <div class="pts">${pts}</div>
     </div>`).join('');
   $('#mtally').innerHTML = rows.map(([k,name,pts])=>`
-    <div class="t ${(k==='bot'?b>=h:h>b)?'lead':''}">
-      <div class="who">${esc(name)}</div><div class="pts">${pts}</div>
+    <div class="t ${k}">
+      <div class="who">${esc(name)}</div><div class="pts">${pts}</div>${leads(k)}
     </div>`).join('');
 }
 
