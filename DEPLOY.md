@@ -31,9 +31,13 @@ AWS console → **Lambda** → region **ap-south-1** → **Create function**:
 Then on the function:
 
 1. **Configuration → General configuration → Edit:** timeout **10 seconds**.
-2. **Configuration → Concurrency → Edit:** reserved concurrency **5**. The
-   URL is public, so this caps what anyone hammering it can cost. It stays far
-   inside the free tier either way.
+2. **Concurrency: leave it unreserved.** New AWS accounts can run only 10
+   functions at once account-wide, and Lambda refuses any reservation that
+   leaves fewer than 100 unreserved. The account limit already caps what a
+   public URL can cost. To stop a burst of lookups ever crowding out the bot at
+   a deadline, request a raise (free, usually approved within a day): **Service
+   Quotas → AWS Lambda → Concurrent executions → 1000**, then reserve **5** for
+   `fpl-proxy` here.
 3. **Configuration → Function URL → Create function URL:**
    - Auth type: **NONE**
    - Expand **Additional settings → Configure cross-origin resource sharing (CORS)**, tick it, and set:
@@ -42,7 +46,8 @@ Then on the function:
      - Max age: `300`
    - Save, and copy the **Function URL** (`https://….lambda-url.ap-south-1.on.aws/`).
 
-Leave the code as Lambda's placeholder. The workflow replaces it.
+Leave the code as Lambda's "Hello from Lambda!" placeholder. The workflow
+recognises it and replaces it; anything else edited in the console is refused.
 
 ### 2. Let the deploy role update it (once)
 
