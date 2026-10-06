@@ -300,6 +300,13 @@ svg{display:block;width:100%;height:auto;overflow:visible}
   text-transform:uppercase;color:var(--lavd);margin-bottom:4px}
 .lfact b{color:var(--white);font-weight:600}
 .lfact .good{color:var(--mint)} .lfact .warn{color:var(--amber)}
+.ups{list-style:none;display:grid;gap:var(--s2);margin-top:var(--s1)}
+.ups li{display:grid;grid-template-columns:auto 1fr auto;gap:var(--s3);align-items:baseline;
+  padding-top:var(--s2);border-top:1px solid var(--line)}
+.ups li:first-child{border-top:none;padding-top:0}
+.ups .rk{font-family:var(--mono);font-size:var(--t-2xs);color:var(--lavd);min-width:1ch}
+.ups .sub{display:block;font-size:var(--t-sm);color:var(--lavd);margin-top:2px}
+.ups .g{font-family:var(--mono);font-weight:600;color:var(--mint);white-space:nowrap}
 
 .state{padding:var(--s18) var(--s5);text-align:center;color:var(--lav)}
 .state h3{font-family:var(--display);font-size:var(--t-2xl);font-weight:700;color:var(--white);margin-bottom:var(--s2)}
@@ -1252,13 +1259,17 @@ function lookupResult(entry, gw, picks, proj, players){
   return w;
 }
 
-// Best single swap on the bot's 5-week ownership score, within the owned
-// player's current price + £2.0m, same position, at most 3 per club.
+// The best swaps on the bot's 5-week ownership score, each within the owned
+// player's current price + £2.0m, same position, at most 3 per club. Ranked
+// by gain; each outgoing and each incoming player appears once, so the list
+// is five different decisions rather than five replacements for one player.
+const UPGRADES_SHOWN = 5;
+
 function upgradeText(squad, players, run){
   const owned = new Set(squad.map(p=>String(p.id)));
   const clubs = {};
   squad.forEach(p=>{ clubs[p.team]=(clubs[p.team]||0)+1; });
-  let top = null;
+  const swaps = [];
   squad.forEach(out=>{
     const base = run(out.id);
     if(base==null) return;
@@ -1268,20 +1279,31 @@ function upgradeText(squad, players, run){
       if(pos!==out.pos || cost>out.cost+UPGRADE_BUDGET) continue;
       if(club!==out.team && (clubs[club]||0)>=3) continue;
       const r = run(id);
-      if(r==null) continue;
-      const gain = r-base;
-      if(!top || gain>top.gain) top = {gain, out, name, club, cost};
+      if(r==null || r-base<=0.05) continue;
+      swaps.push({gain:r-base, now:r, was:base, out, id, name, club, cost});
     }
   });
-  const k = `<span class="k">Best affordable upgrade · next five gameweeks</span>`;
-  const note = `<div class="lhint" style="margin-top:6px">Assumes up to ${money(UPGRADE_BUDGET)} more than
-    the outgoing player&rsquo;s current price: your bank and selling prices aren&rsquo;t public.
-    Ranked on the model&rsquo;s five-week score, which is what the bot uses for its own transfers.</div>`;
-  if(!top || top.gain<=0.05)
+  swaps.sort((x,y)=>y.gain-x.gain);
+  const picked = [], outs = new Set(), ins = new Set();
+  for(const sw of swaps){
+    if(outs.has(sw.out.id) || ins.has(sw.id)) continue;
+    picked.push(sw); outs.add(sw.out.id); ins.add(sw.id);
+    if(picked.length===UPGRADES_SHOWN) break;
+  }
+
+  const k = `<span class="k">Best affordable upgrades · next five gameweeks</span>`;
+  const note = `<div class="lhint" style="margin-top:var(--s2)">Each row is a separate option, not a
+    plan: taking two together may break the budget or the three-per-club limit. Assumes up to
+    ${money(UPGRADE_BUDGET)} more than the outgoing player&rsquo;s current price: your bank and
+    selling prices aren&rsquo;t public. Ranked on the model&rsquo;s five-week score, which is what
+    the bot uses for its own transfers.</div>`;
+  if(!picked.length)
     return k+`No single swap within that budget beats your current players on the model&rsquo;s five-week view.`+note;
-  return k+`<b>${esc(top.out.name)}</b> → <b class="good">${esc(top.name)}</b>
-    (${esc(top.club)}, ${money(top.cost)}): <span class="good">+${n1(top.gain)}</span> a week on the
-    five-week projection.`+note;
+  return k+`<ol class="ups">`+picked.map((sw,i)=>`
+    <li><span class="rk">${i+1}</span>
+      <span><b>${esc(sw.out.name)}</b> → <b class="good">${esc(sw.name)}</b>
+        <span class="sub">${esc(sw.club)}, ${money(sw.cost)} · ${n1(sw.now)} a week vs ${n1(sw.was)}</span></span>
+      <span class="g">+${n1(sw.gain)}</span></li>`).join('')+`</ol>`+note;
 }
 
 function ago(iso){
