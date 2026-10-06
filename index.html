@@ -399,7 +399,7 @@ const ANALYTICS = {
 /* Squad lookup. FPL's API can't be read from the browser (no CORS header), so
    the lookup goes through the fpl-proxy Lambda — see DEPLOY.md. While this is
    empty the lookup is not shown at all and the page is otherwise unchanged. */
-const PROXY_BASE = '';   // Lambda Function URL, e.g. https://xxxx.lambda-url.ap-south-1.on.aws
+const PROXY_BASE = 'https://kmfpuhotvhrmudghu7cyf4tc4m0ywwcs.lambda-url.ap-south-1.on.aws';   // fpl-proxy Function URL, no trailing slash; '' hides the lookup
 
 function loadAnalytics(){
   if(ANALYTICS.ga4){
