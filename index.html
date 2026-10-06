@@ -339,11 +339,13 @@ svg{display:block;width:100%;height:auto;overflow:visible}
     margin-inline:calc(-1 * max(var(--s4),env(safe-area-inset-left))) calc(-1 * max(var(--s4),env(safe-area-inset-right)));
     padding:calc(var(--s2) + env(safe-area-inset-top)) max(var(--s4),env(safe-area-inset-right))
             var(--s2) max(var(--s4),env(safe-area-inset-left));
-    background:rgba(23,2,29,.88);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);
+    background:rgba(23,2,29,.94);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);
     border-bottom:1px solid var(--line)}
   .mnav .tabs{margin-bottom:var(--s2)}
   .mobilebar{margin-bottom:var(--s3)}
   body.team .strip{display:none}
+  /* a landscape phone is ~340px tall: pinned, the bar would take a third of it */
+  @media(max-height:500px){.mnav{position:static}}
   body.team .mnav .tabs{margin-bottom:0}
   /* the pill strip scrolls edge to edge, but its first and last pills stop
      clear of the notch and the rounded corners */
