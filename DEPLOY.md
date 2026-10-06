@@ -78,9 +78,9 @@ In `index.html`, set the URL without a trailing slash:
 const PROXY_BASE = 'https://….lambda-url.ap-south-1.on.aws';
 ```
 
-Merge to `main`. The **Score your own team** panel appears under the gameweek
-view. While `PROXY_BASE` is empty the panel isn't rendered at all and the rest
-of the page is unchanged.
+Merge to `main`. The site gains two tabs, **The bot** and **Your team**, and
+team lookups get their own address (`#team/1234567`). While `PROXY_BASE` is
+empty there are no tabs and the page is the bot's alone, exactly as before.
 
 ### If it stops working
 

@@ -274,10 +274,25 @@ svg{display:block;width:100%;height:auto;overflow:visible}
   justify-content:space-between;gap:var(--s4);flex-wrap:wrap}
 .foot .eyebrow{font-size:var(--t-2xs)}
 
-/* squad lookup — someone else's team, so it is set apart from the bot's */
-.lookup{border-color:rgba(255,194,77,.32);margin-top:var(--s2)}
-.lookup[open] summary{color:var(--amber)}
-.lbody{padding:var(--s4) var(--s4) var(--s5)}
+/* ---------- tabs: the bot's season, or your own team ---------- */
+.tabs{display:grid;grid-template-columns:1fr 1fr;gap:var(--s1);padding:var(--s1);
+  border-radius:12px;background:var(--card);border:1px solid var(--line);margin-bottom:var(--s6)}
+.tabs[hidden]{display:none}
+.tab{min-height:40px;border-radius:9px;font-family:var(--mono);font-size:var(--t-2xs);
+  font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--lavd)}
+.tab[aria-selected="true"]{background:var(--mint);color:#04120A}
+.tab[data-tab="team"][aria-selected="true"]{background:var(--amber);color:#1A1200}
+@media(hover:hover){.tab:not([aria-selected="true"]):hover{color:var(--white)}}
+.mnav{display:none}
+
+/* a one-line way into "Your team" from the bot's page */
+.teamcta{display:inline-flex;align-items:center;gap:var(--s2);margin-top:var(--s4);
+  min-height:44px;padding:0 var(--s4);border-radius:999px;border:1px solid rgba(255,194,77,.4);
+  color:var(--amber);font-size:var(--t-sm);font-weight:600;text-decoration:none}
+@media(hover:hover){.teamcta:hover{background:rgba(255,194,77,.08)}}
+
+/* ---------- your team (squad lookup) ---------- */
+#team .head .eyebrow{color:var(--amber)}
 .lform{display:flex;gap:var(--s2);flex-wrap:wrap;margin:var(--s4) 0 6px}
 .lform input{flex:1 1 180px;min-width:0;min-height:44px;padding:0 var(--s4);border-radius:10px;
   border:1px solid var(--line);background:rgba(0,0,0,.25);color:var(--white);
@@ -319,6 +334,17 @@ svg{display:block;width:100%;height:auto;overflow:visible}
   .rail{display:none}
   .main{padding:calc(var(--s5) + env(safe-area-inset-top)) max(var(--s4),env(safe-area-inset-right))
           calc(var(--s14) + env(safe-area-inset-bottom)) max(var(--s4),env(safe-area-inset-left))}
+  /* tabs and pills, pinned: full bleed, frosted, clear of the notch */
+  .mnav{display:block;position:sticky;top:0;z-index:10;margin-bottom:var(--s5);
+    margin-inline:calc(-1 * max(var(--s4),env(safe-area-inset-left))) calc(-1 * max(var(--s4),env(safe-area-inset-right)));
+    padding:calc(var(--s2) + env(safe-area-inset-top)) max(var(--s4),env(safe-area-inset-right))
+            var(--s2) max(var(--s4),env(safe-area-inset-left));
+    background:rgba(23,2,29,.88);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);
+    border-bottom:1px solid var(--line)}
+  .mnav .tabs{margin-bottom:var(--s2)}
+  .mobilebar{margin-bottom:var(--s3)}
+  body.team .strip{display:none}
+  body.team .mnav .tabs{margin-bottom:0}
   /* the pill strip scrolls edge to edge, but its first and last pills stop
      clear of the notch and the rounded corners */
   .strip{margin-inline:calc(-1 * max(var(--s4),env(safe-area-inset-left))) calc(-1 * max(var(--s4),env(safe-area-inset-right)));
@@ -382,6 +408,7 @@ svg{display:block;width:100%;height:auto;overflow:visible}
 @media(pointer:coarse){
   .chip{min-height:44px;display:inline-flex;align-items:center}
   .gwbtn{min-height:44px}
+  .tab{min-height:44px}
   .tz::after{content:'';position:absolute;inset:-13px -8px}   /* invisible, enlarges the target */
   .guide summary{min-height:48px}
 }
@@ -422,6 +449,7 @@ svg{display:block;width:100%;height:auto;overflow:visible}
     <div class="eyebrow">Autonomous FPL</div>
     <h1 id="railTitle">Bot vs human</h1>
     <div class="sub" id="railSub">Loading…</div>
+    <div class="tabs" id="railTabs" role="tablist" aria-label="View" hidden></div>
     <div class="tally" id="tally"></div>
     <div class="eyebrow dim" style="margin-bottom:10px">Gameweeks</div>
     <nav class="gwlist" id="gwlist"></nav>
@@ -436,6 +464,10 @@ svg{display:block;width:100%;height:auto;overflow:visible}
         </div>
       </div>
       <div class="mtally" id="mtally"></div>
+    </div>
+    <!-- mobile: tabs and gameweek pills stay pinned while the page scrolls -->
+    <div class="mnav" id="mnav">
+      <div class="tabs" id="mTabs" role="tablist" aria-label="View" hidden></div>
       <div class="strip" id="strip"></div>
     </div>
     <div id="view"><div class="skel" aria-busy="true">
@@ -445,7 +477,7 @@ svg{display:block;width:100%;height:auto;overflow:visible}
       <div class="sk-row"><div class="sk sk-card"></div><div class="sk sk-card"></div><div class="sk sk-card"></div><div class="sk sk-card"></div></div>
       <div class="sk-row"><div class="sk sk-card"></div><div class="sk sk-card"></div><div class="sk sk-card"></div><div class="sk sk-card"></div></div>
     </div></div>
-    <div id="lookup"></div>
+    <div id="team" hidden></div>
     <div id="footer"></div>
   </main>
 
@@ -535,7 +567,7 @@ function flushDwell(){
 
 addEventListener('visibilitychange', () => {
   if(document.visibilityState === 'hidden') flushDwell();
-  else if(current != null) startDwell(current);
+  else if(current != null && VIEW==='bot') startDwell(current);
 });
 addEventListener('pagehide', flushDwell);
 
@@ -552,7 +584,7 @@ addEventListener('scroll', () => {
     [25,50,75,100].forEach(mark => {
       if(pct >= mark && !seenDepth.has(mark)){
         seenDepth.add(mark);
-        track('scroll_depth', {gw: current, percent: mark});
+        track('scroll_depth', {gw: VIEW==='team' ? 'team' : current, percent: mark});
       }
     });
   });
@@ -590,8 +622,8 @@ async function init(){
 
   renderTally();
   renderNav();
-  if(PROXY_BASE) renderLookup();
-  // Outside the gameweek view, so it stays last when the lookup is shown.
+  if(HAS_TEAM){ renderTabs(); renderTeam(); }
+  // Outside both views, so it stays last whichever is shown.
   $('#footer').appendChild(foot());
 
   track('site_load', {
@@ -600,12 +632,70 @@ async function init(){
     entry: (SEASON.entries?.bot?.name || '').slice(0,40),
   });
 
-  const fromHash = parseInt((location.hash||'').replace('#gw',''),10);
-  select(gws.some(g=>g.gw===fromHash) ? fromHash : gws[gws.length-1].gw);
-  addEventListener('hashchange',()=>{
-    const g = parseInt((location.hash||'').replace('#gw',''),10);
-    if(gws.some(x=>x.gw===g) && g!==current) select(g);
+  // #gw5 is the bot's gameweek 5; #team or #team/1234567 is the squad lookup.
+  const route = () => {
+    const h = location.hash || '';
+    const t = h.match(/^#team(?:\/(\d{1,10}))?$/);
+    if(t && HAS_TEAM) return openTeam(t[1]);
+    const g = parseInt(h.replace('#gw',''),10);
+    const gw = gws.some(x=>x.gw===g) ? g : (current ?? gws[gws.length-1].gw);
+    if(VIEW!=='bot' || gw!==current) select(gw);
+  };
+  route();
+  addEventListener('hashchange', route);
+}
+
+/* ---------- views ---------- */
+const HAS_TEAM = !!PROXY_BASE;      // no proxy, no lookup: the page is the bot's alone
+let VIEW = 'bot', TEAM_SHOWN = null;
+
+function renderTabs(){
+  ['#railTabs','#mTabs'].forEach(sel => {
+    const t = $(sel);
+    t.hidden = false;
+    t.innerHTML = `<button class="tab" role="tab" data-tab="bot">The bot</button>
+      <button class="tab" role="tab" data-tab="team">Your team</button>`;
+    t.querySelectorAll('.tab').forEach(b => b.onclick = () => go(b.dataset.tab));
   });
+}
+
+// A tab click is a new history entry, so Back returns to the other view.
+function go(tab){
+  if(tab===VIEW) return;
+  location.hash = tab==='team' ? (TEAM_SHOWN ? '#team/'+TEAM_SHOWN : '#team')
+                               : '#gw'+(current ?? SEASON.gameweeks[SEASON.gameweeks.length-1].gw);
+}
+
+function showView(tab){
+  VIEW = tab;
+  $('#view').hidden = tab!=='bot';
+  $('#team').hidden = tab!=='team';
+  document.body.classList.toggle('team', tab==='team');
+  document.querySelectorAll('.tab').forEach(b =>
+    b.setAttribute('aria-selected', String(b.dataset.tab===tab)));
+}
+
+function openTeam(id){
+  const arriving = VIEW!=='team';
+  showView('team');
+  if(arriving){
+    flushDwell(); seenDepth = new Set();
+    track('tab_view', {tab:'team'});
+    try { if(window.gtag) gtag('event','page_view',{page_title:'Your team',
+      page_location:location.href, page_path:'/team'}); } catch(e) {}
+    scrollTo({top:0,behavior:'auto'});
+  }
+  const input = $('#lid');
+  if(id){
+    if(id!==TEAM_SHOWN){ input.value = id; lookup(id); }
+  } else if(TEAM_SHOWN){
+    history.replaceState(null,'','#team/'+TEAM_SHOWN);   // keep the address bookmarkable
+  } else {
+    // Back again: show the team looked up last time straight away.
+    let saved = '';
+    try { saved = localStorage.getItem('fpl-lookup-id') || ''; } catch(e) {}
+    if(saved){ input.value = saved; lookup(saved); }
+  }
 }
 
 function empty(why){
@@ -659,7 +749,10 @@ function renderNav(){
 
 function select(gw){
   const from = current;
+  const fromTeam = VIEW==='team';
   current=gw;
+  if(HAS_TEAM) showView('bot');
+  if(fromTeam) track('tab_view', {tab:'bot'});
   history.replaceState(null,'','#gw'+gw);
   const rec = SEASON.gameweeks.find(g=>g.gw===gw);
   trackPage(gw);
@@ -704,6 +797,12 @@ function render(g){
   if(topl) flags.append(pill(topl+' still to play','live'));
   if(!g.instrumented) flags.append(pill('No projection recorded'));
   head.appendChild(flags);
+  if(HAS_TEAM){
+    const cta = el('a','teamcta','How does your team compare? Score it →');
+    cta.href = '#team';
+    cta.onclick = () => track('team_cta_click', {gw: g.gw});
+    head.appendChild(cta);
+  }
   v.appendChild(head);
 
   v.appendChild(verdict(g,scored));
@@ -1104,19 +1203,13 @@ class LookupError extends Error {
   constructor(reason, message){ super(message); this.reason = reason; }
 }
 
-function renderLookup(){
-  const d = document.createElement('details');
-  d.className = 'guide lookup';
-  d.addEventListener('toggle', () => { if(d.open) track('lookup_open', {}); });
-  const sum = el('summary');
-  sum.innerHTML = 'Score your own team <span class="chev">⌄</span>';
-  d.appendChild(sum);
-
-  const body = el('div','lbody');
-  body.innerHTML = `
-    <p class="gintro">Not the bot&rsquo;s team: <b>yours</b>. Enter an FPL entry ID and
-      see how the model rated that squad, using the projections it committed
-      before kickoff.</p>
+function renderTeam(){
+  const w = $('#team');
+  w.innerHTML = `
+    <div class="head"><div class="eyebrow">Your team</div>
+      <h2>Score your own team</h2>
+      <p>Not the bot&rsquo;s team: <b>yours</b>. Enter an FPL entry ID and see how the
+        model rated that squad, using the projections it committed before kickoff.</p></div>
     <form class="lform" novalidate>
       <input id="lid" inputmode="numeric" autocomplete="off" maxlength="10"
         placeholder="Entry ID, e.g. 2673853" aria-label="FPL entry ID">
@@ -1125,10 +1218,7 @@ function renderLookup(){
     <div class="lhint">It&rsquo;s the number in the address of your FPL Points page:
       <code>…/entry/<b>1234567</b>/event/6</code></div>
     <div id="lout" aria-live="polite"></div>`;
-  d.appendChild(body);
-  $('#lookup').appendChild(d);
-
-  const input = $('#lid', body), form = $('form', body);
+  const input = $('#lid', w), form = $('form', w);
   try { input.value = localStorage.getItem('fpl-lookup-id') || ''; } catch(e) {}
   form.addEventListener('submit', ev => { ev.preventDefault(); lookup(input.value.trim()); });
 }
@@ -1189,6 +1279,8 @@ async function lookup(raw){
 
     out.innerHTML = '';
     out.appendChild(lookupResult(entry, gw, picks, proj, meta.players || {}));
+    TEAM_SHOWN = raw;
+    if(VIEW==='team') history.replaceState(null,'','#team/'+raw);
     track('lookup_success', {gw});
   } catch(e) { fail(e); }
   finally { btn.disabled = false; }
