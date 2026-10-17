@@ -2728,6 +2728,13 @@ def news_check_is_worthwhile(should_update, gameweek):
         print("[news] Deadline not close enough for team news to exist — skipping.")
         return False
 
+    # The cooldown only saves money on the paid Claude fallback. On free-tier
+    # Gemini it did harm: a second run inside the window skipped the news
+    # entirely (rather than reusing it), so on GW7 Haaland's "probably needs
+    # rest" was applied by one run and silently ignored by the next.
+    if os.environ.get('GEMINI_API_KEY', '').strip():
+        return True
+
     param = '/fpl-bot/last-news-check'
     now = datetime.now(timezone.utc)
     try:
