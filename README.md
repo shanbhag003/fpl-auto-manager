@@ -3,7 +3,8 @@
 An autonomous Fantasy Premier League manager. It scores every player in the
 game, plans transfers, picks the starting XI and captain, decides when to play
 chips, submits all of it, emails an explanation of why — and publishes every
-prediction before kickoff so the model can be marked in public.
+prediction before kickoff so the model can be marked in public. Anyone can also
+score their own FPL team against those same frozen projections.
 
 It runs unattended on AWS Lambda, entirely on free tiers. When it can't sign in
 to FPL, it doesn't fail — it emails the same decisions for you to apply by hand.
@@ -26,15 +27,17 @@ When it does act:
 
 1. Rates all ~600 players on expected points, for this week and for the next
    five, counting an injured player only for the weeks he's expected back
-2. Reads the last four days of injury and team-news headlines for its squad's
+2. Corrects those projections by how its earlier ones compared with what
+   actually happened
+3. Reads the last four days of injury and team-news headlines for its squad's
    clubs, and lowers the rating of anyone they flag
-3. Plans every transfer in one optimisation: the best XI and captain over five
+4. Plans every transfer in one optimisation: the best XI and captain over five
    weeks, minus hits, weighed against saving the free transfers
-4. Picks the best legal XI, captain, vice-captain and bench order
-5. Plays a chip when its projected gain clears a backtested threshold, and uses
+5. Picks the best legal XI, captain, vice-captain and bench order
+6. Plays a chip when its projected gain clears a backtested threshold, and uses
    up any chip before its window closes
-6. Submits everything, then emails the reasoning with a shareable squad image
-7. Commits its projection for every player in the game, and FPL's own, before a
+7. Submits everything, then emails the reasoning with a shareable squad image
+8. Commits its projection for every player in the game, and FPL's own, before a
    ball is kicked
 
 A second job runs every six hours and fills in what actually happened, so the
@@ -70,7 +73,10 @@ player-gameweeks:
 - Its team-goal predictions, used as the fixture adjustment, did no better than
   FPL's difficulty rating on seasons they weren't tuned on.
 
-Sweeping the optimiser's constants showed only noise, so they stay too.
+Sweeping the optimiser's constants showed only noise, so they stay too. And
+shrinking hot-form players toward their position's average, a standard fix for
+an optimiser that keeps buying its own over-estimates, ranked players worse and
+scored fewer simulated points at every strength tried, so it isn't used.
 
 **Two scores, not one.** Who you *own* is a five-gameweek question, because
 transfers are scarce and a player is bought for a run of fixtures. Who *starts*
@@ -144,9 +150,25 @@ after the deadline.
 
 The same file records FPL's own projection and chance of playing for every
 player, as published before that deadline. The public archives only keep a
-version written after the matches, which leaks the result. This is the honest
-record that the bot's 50% blend with FPL's projection will eventually be tested
-against.
+version written after the matches, which leaks the result. That honest record is
+what showed the bot's 50% blend with FPL's projection was a mistake, and cut it
+to 15%. It also keeps the scores from before the weekly correction, so each
+correction is fitted on the model's own numbers rather than on the last one's.
+
+**Score your own team.** The site has two tabs: *The bot*, and *Your team*.
+Enter any FPL entry ID and it shows that squad rated with the projections the
+model committed before kickoff:
+
+- the model's total for the XI and captain
+- whether it agrees with the captain
+- the weakest starter
+- the five best upgrades on the five-week score, each within the outgoing
+  player's price + £2.0m and the three-per-club limit
+
+Results have their own address (`#team/1234567`), so they can be bookmarked or
+shared. FPL's API can't be read from a browser on another site, so lookups go
+through a tiny read-only Lambda that forwards exactly two public paths and
+nothing else. `make_lookup_card.py` turns any lookup into a LinkedIn card.
 
 **It degrades instead of failing.** FPL retired the login endpoint this project
 depended on, mid-build. Rather than patch around it, the system was rebuilt so
@@ -156,6 +178,8 @@ The same principle applies everywhere else:
 - No optimiser layer: a pure-Python fallback within about 1% of optimal.
 - Gemini busy or out of quota: the next model is tried.
 - No news at all: the week goes ahead without it.
+- Not enough finished weeks to fit the self-correction: projections go out
+  uncorrected.
 - GitHub outage: it costs a chart, never a gameweek.
 
 ---
@@ -177,10 +201,11 @@ See [SETUP.md](SETUP.md) — layers, environment variables, IAM, schedule, and
 the one recurring manual step: refreshing `FPL_TOKEN` on deadline day.
 
 Code reaches Lambda through GitHub, not the console. Merging a change to
-`fpl_bot_hybrid.py` or `fpl_results.py` into `main` runs the **Deploy Lambda**
-workflow. It signs in to AWS with a short-lived OIDC token (no stored keys),
+`fpl_bot_hybrid.py`, `fpl_results.py` or `proxy_lambda.py` into `main` runs the
+**Deploy Lambda** workflow. It signs in to AWS with a short-lived OIDC token (no stored keys),
 replaces only the handler file, and refuses to overwrite code that was edited in
-the console. [LAMBDA_DEPLOY.md](LAMBDA_DEPLOY.md) has the one-time AWS setup.
+the console. [LAMBDA_DEPLOY.md](LAMBDA_DEPLOY.md) has the one-time AWS setup,
+and [DEPLOY.md](DEPLOY.md) the squad-lookup proxy's.
 
 ---
 
@@ -197,6 +222,7 @@ data/players.json          names, positions, clubs and prices for the squad look
 backtest/                  replays past seasons: model comparison, tuning, season simulator
 tools/check_news.py        runs the team-news check locally on the squad
 make_card.py               renders a gameweek share card (Share card workflow)
+make_lookup_card.py        renders a "Your team" share card for any FPL entry
 .github/workflows/         Deploy Lambda, Lambda snapshot, Share card, Seed GW1
 SETUP.md                   deployment guide for the bot
 LAMBDA_DEPLOY.md           GitHub → Lambda deploys and their AWS setup
