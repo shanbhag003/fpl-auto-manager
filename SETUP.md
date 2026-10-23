@@ -181,6 +181,8 @@ All at the top of their sections in `fpl_bot_hybrid.py`. The backtest in
 | `HIT_MARGIN` | 2.0 | Charged on top of each −4 hit |
 | `MAX_HITS_PER_GW` | 1 | Set to 0 to forbid point hits entirely |
 | `BENCH_WEIGHT` | 0.1 | Share of a bench player's score that counts when choosing the squad |
+| `EP_NEXT_MAX_WEIGHT` | 0.15 | Share of FPL's own projection in the blend (was 0.5 until GW8; it over-rated in-form players) |
+| `CALIBRATION_PRIOR`, `CALIBRATION_HALF_LIFE` | 1200, 3 | How fast the weekly self-calibration reacts; slow on purpose |
 | `FIXTURE_WEIGHTS` | `[1.0, .85, .7, .55, .4]` | Ownership horizon. `[1.0]` reverts to this gameweek only. |
 | `AUTO_PLAY_CHIPS` | `True` | `False` stops chips being played (advisory emails still recommend) |
 | `CHIP_THRESHOLDS` | TC 9, BB 13.3, FH 6, WC 13.5 | Projected gain at which each chip is played |

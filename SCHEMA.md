@@ -31,6 +31,8 @@ Costs and prices are FPL's `now_cost`: tenths of £m (`55` = £5.5m). Player
 |---|---|
 | `scores[id]` | `[score_now, score_run]`. `score_now` is this gameweek's projection, which picks the XI and captain. `score_run` is the five-gameweek ownership score per gameweek, used for transfers. |
 | `fpl[id]` | `[ep_next, chance_of_playing_next_round]`, as FPL published them before this deadline. From GW6. |
+| `raw[id]` | `[score_now, score_run]` before the weekly calibration. From GW9. Next week's calibration is fitted on these, so corrections don't compound. |
+| `meta` | `{ep_weight, calibration: {a, b, n, gws}}`: FPL's share in the blend, and the correction `points = a + b × projection` applied to `scores`. From GW9. |
 | `partial` | `true` only in GW1, which was transcribed from the emailed poster and covers the bot's 15 players. |
 
 Write-once: if the file exists, the bot doesn't touch it, so the commit

@@ -242,7 +242,12 @@ RECENT_PRIOR_MATCHES = 1.5        # shrinkage: pseudo-matches of the season prio
 USE_RECENT_STARTS = True          # False reverts score_now to the blended prob
 UNPROVEN_START_PROB = 0.65        # prior for players with no PL history
 EP_NEXT_TRUST_GAMEWEEK = 6        # gameweek by which ep_next reaches its full weight
-EP_NEXT_MAX_WEIGHT = 0.5          # ...and that full weight is half, never all of it
+EP_NEXT_MAX_WEIGHT = 0.15         # ...and that full weight is 15%. It was 50% until
+                                  # GW8: measured on the honest pre-deadline values the
+                                  # bot logs, FPL's projection over-rated in-form players
+                                  # (bot XI 8.9 projected vs 3.7 scored, GW6-7) and
+                                  # predicted worse than the bot's own model (corr 0.45
+                                  # vs 0.53); 15% fitted best.
 
 
 # Snapshot of 2025/26 final stats, captured 2026-08-06 from bootstrap-static.
@@ -877,6 +882,115 @@ def estimate_base_points(players_df, gameweek):
 
 
 
+# --- Learning from its own mistakes: weekly calibration --------------------
+# The player model updates each player from his results, but nothing ever
+# checked the model's projections as a whole against what happened, so a
+# systematic error just carried on (GW6-7: players projected 5+ scored 62% of
+# it; the bot's XI projected 75 and scored 46, then 36). This closes the loop:
+# every run fits  points = a + b x projection  on the frozen pre-kickoff
+# projections of finished gameweeks, recent weeks weighted most, and applies
+# it to this week's projections before any decision is made.
+#
+# It is monotone, so it never reorders players: who is best is unchanged.
+# What it fixes is size, which is what hits and chips are decided on (GW8's
+# Free Hit was played on a projected gain of 15.4).
+#
+# Deliberately slow. Walk-forward on GW5-7, a fast version (half-life 2,
+# prior 300) chased week-to-week swings (GW2-5 under-projected, GW6-7 over)
+# and was no better than none; this setting stays within +/-0.15 of no
+# correction on ordinary weeks and only bites on a drift that lasts.
+CALIBRATION_HALF_LIFE = 3          # gameweeks: slow on purpose (see below)
+CALIBRATION_PRIOR = 1200           # pseudo player-weeks pulling toward "no correction"
+CALIBRATION_MIN_PROJ = 2.0         # fit on players the model rated as relevant
+CALIBRATION_A = (-1.0, 1.5)        # bounds on the intercept...
+CALIBRATION_B = (0.7, 1.1)         # ...and the slope, so one odd week can't run away
+CALIBRATION = None                 # {'a', 'b', 'n', 'gws'} for this run, once fitted
+
+
+def ep_weight(gameweek, cap=None):
+    """Share of FPL's ep_next in the blend for a gameweek."""
+    cap = EP_NEXT_MAX_WEIGHT if cap is None else cap
+    return min(cap, max(0.0, (gameweek - 1) / EP_NEXT_TRUST_GAMEWEEK) * cap)
+
+
+def fit_calibration(bootstrap_data, gameweek):
+    """Fit points ~ a + b x projection on finished gameweeks. None on failure.
+
+    Uses each file's uncalibrated projections ('raw' when present). Files
+    written before the ep_next weight changed are moved onto today's weight
+    with the ep_next values they logged, so the fit describes the model as it
+    is now, not as it was.
+    """
+    checked = {int(e['id']) for e in bootstrap_data.get('events', [])
+               if e.get('finished') and e.get('data_checked')}
+    w_now = ep_weight(gameweek)
+    xs, ys, ws, used = [], [], [], []
+    for gw in range(2, gameweek):
+        if gw not in checked:
+            continue
+        frozen, _sha = gh_read(f'{SNAPSHOT_PREFIX}/projections/gw{gw}.json')
+        if not frozen or frozen.get('partial'):
+            continue
+        scores = frozen.get('raw') or frozen.get('scores') or {}
+        ep = frozen.get('fpl') or {}
+        w_then = (frozen.get('meta') or {}).get('ep_weight', ep_weight(gw, cap=0.5))
+        live = live_gameweek(gw)
+        pts = {int(e['id']): (e.get('stats') or {}).get('total_points', 0)
+               for e in (live or {}).get('elements', [])}
+        weight = 0.5 ** ((gameweek - 1 - gw) / CALIBRATION_HALF_LIFE)
+        n = 0
+        for pid, pair in scores.items():
+            proj = pair[0] if pair else None
+            if proj is None or int(pid) not in pts:
+                continue
+            proj = max(0.0, float(proj))
+            e = (ep.get(pid) or [None])[0]
+            if e is not None and abs(w_then - w_now) > 1e-6 and w_then < 1:
+                own = (proj - w_then * e) / (1 - w_then)
+                proj = max(0.0, w_now * e + (1 - w_now) * own)
+            if proj < CALIBRATION_MIN_PROJ:
+                continue
+            xs.append(proj); ys.append(pts[int(pid)]); ws.append(weight); n += 1
+        if n:
+            used.append(gw)
+    if len(xs) < 30:
+        return None
+    x, y, w = np.array(xs), np.array(ys, dtype=float), np.array(ws)
+    sw = w.sum()
+    mx, my = (w * x).sum() / sw, (w * y).sum() / sw
+    vx = (w * (x - mx) ** 2).sum()
+    b_hat = (w * (x - mx) * (y - my)).sum() / vx if vx > 0 else 1.0
+    a_hat = my - b_hat * mx
+    k = sw / (sw + CALIBRATION_PRIOR)          # shrink toward a=0, b=1
+    a = float(np.clip(k * a_hat, *CALIBRATION_A))
+    b = float(np.clip(k * b_hat + (1 - k) * 1.0, *CALIBRATION_B))
+    return {'a': round(a, 3), 'b': round(b, 3), 'n': len(xs), 'gws': used}
+
+
+def calibrate(values):
+    """Apply CALIBRATION to a Series of scores. Penalties (<= 0) are left alone.
+
+    Above CALIBRATION_MIN_PROJ: a + b x v. Below it, scaled through the origin
+    so the line stays continuous and a bench-fodder 0.3 doesn't jump to 0.3 + a.
+    """
+    if not CALIBRATION:
+        return values
+    a, b, lo = CALIBRATION['a'], CALIBRATION['b'], CALIBRATION_MIN_PROJ
+    hi = a + b * values
+    low = values * ((a + b * lo) / lo)
+    return values.where(values <= 0, hi.where(values >= lo, low)).astype(float)
+
+
+def apply_calibration(df):
+    """Keep the raw scores, then calibrate the ones decisions read."""
+    df['score_now_raw'] = df['score_now']
+    df['score_run_raw'] = df['score_run']
+    df['score_now'] = calibrate(df['score_now'])
+    df['score_run'] = calibrate(df['score_run'])
+    df['score'] = df['score_run']
+    return df
+
+
 # --- Forward-looking fixture difficulty -------------------------------------
 # The bot re-decides every week, so in principle it could just buy a player when
 # their fixtures turn. In practice transfers are scarce: knowing a good run
@@ -1102,6 +1216,17 @@ def get_data(bootstrap_data, gameweek):
     # `score` stays as the ownership view, so everything that selects a squad
     # keeps working unchanged. Lineup code asks for score_now explicitly.
     players_df['score'] = players_df['score_run']
+
+    global CALIBRATION
+    try:
+        CALIBRATION = fit_calibration(bootstrap_data, gameweek)
+    except Exception as e:
+        print(f"[calibration] could not fit ({type(e).__name__}: {e}); projections uncorrected")
+        CALIBRATION = None
+    if CALIBRATION:
+        print(f"[calibration] points = {CALIBRATION['a']:+.2f} + {CALIBRATION['b']:.2f} x projection "
+              f"(from {CALIBRATION['n']} player-weeks, GW{CALIBRATION['gws']})")
+    players_df = apply_calibration(players_df)
 
     print(f"[fixtures] Ownership view over {span} gameweek(s) "
           f"({mult_run.min():.2f}-{mult_run.max():.2f}x); "
@@ -3014,7 +3139,9 @@ def optimise_transfers(my_team, players_df, bank, free_transfers, made,
         outs = sorted((i for i in out_ids if pos[i] == p), key=lambda i: lookup.at[i, 'score'])
         ins = sorted((i for i in in_ids if pos[i] == p), key=lambda i: -lookup.at[i, 'score'])
         for o, n in zip(outs, ins):
-            gain = float(lookup.at[n, 'score']) - float(lookup.at[o, 'score'])
+            # Shown, not decided on: an out player's -50 penalty would read as
+            # a '+55 a week' upgrade, so both sides count from zero.
+            gain = max(0.0, float(lookup.at[n, 'score'])) - max(0.0, float(lookup.at[o, 'score']))
             is_free = len(transfers) < available_free
             transfers.append((players_df.loc[players_df.id == o],
                               players_df.loc[players_df.id == n], gain, is_free))
@@ -3170,7 +3297,7 @@ def transfers_between(old_squad, new_squad, players_df):
                      key=lambda i: -lookup.at[i, 'score'])
         for o, n in zip(outs, ins):
             pairs.append((players_df.loc[players_df.id == o], players_df.loc[players_df.id == n],
-                          float(lookup.at[n, 'score']) - float(lookup.at[o, 'score']), True))
+                          max(0.0, float(lookup.at[n, 'score'])) - max(0.0, float(lookup.at[o, 'score'])), True))
     return pairs
 
 
@@ -3727,6 +3854,7 @@ def apply_minutes_risk(players_df, risks):
         df['score_run'] = (df['base_points'] * df['avg_fixtures']
                            * mult_run + df.get('penalty_run', penalty))
         df['score'] = df['score_run']
+        df = apply_calibration(df)
     else:
         df['score'] = (df['base_points'] * df['fixture_count']
                        + df['diff'] / 3 + penalty)
@@ -4014,13 +4142,17 @@ def write_projections(gameweek, players_df):
         print(f"[snapshot] projections for GW{gameweek} already frozen — not rewriting.")
         return
 
-    scores, fpl = {}, {}
+    scores, fpl, raw = {}, {}, {}
     for r in players_df.itertuples():
         now = _num(getattr(r, 'score_now', None))
         run = _num(getattr(r, 'score_run', None))
         if now is None and run is None:
             continue
         scores[str(int(r.id))] = [now, run]
+        raw_now = _num(getattr(r, 'score_now_raw', None))
+        raw_run = _num(getattr(r, 'score_run_raw', None))
+        if raw_now is not None or raw_run is not None:
+            raw[str(int(r.id))] = [raw_now, raw_run]
         # FPL's own projection and chance of playing, as published before this
         # deadline. The archived ones were recorded after the matches
         # (backtest/README.md), so this is the only honest record of them, and
@@ -4033,7 +4165,10 @@ def write_projections(gameweek, players_df):
              {'gw': int(gameweek),
               'written_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
               'scores': scores,
-              'fpl': fpl},     # [ep_next, chance_of_playing_next_round] per player
+              'fpl': fpl,      # [ep_next, chance_of_playing_next_round] per player
+              'raw': raw,      # scores before calibration, which next week's fit uses
+              'meta': {'ep_weight': round(ep_weight(gameweek), 4),
+                       'calibration': CALIBRATION}},
              f'GW{gameweek}: freeze projections for {len(scores)} players')
 
 
