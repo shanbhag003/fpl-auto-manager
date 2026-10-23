@@ -117,6 +117,15 @@ FPL already flags the same injury, the lower of the two estimates is used
 rather than both. In its first live check it caught two injuries FPL hadn't
 flagged yet.
 
+**It checks its own projections, not just its players.** Every run compares
+the projections it froze for finished gameweeks with what those players
+scored, and fits a correction (`points = a + b × projection`) before making
+any decision. It's deliberately slow: it ignores week-to-week swings and only
+bites on a drift that lasts. That drift was real in GW6–7, when players
+projected 5+ scored 62% of it. The cause was FPL's own projection, blended in
+at 50%; measured on pre-deadline values, it over-rated in-form players and
+predicted worse than the bot's own model, so its share is now 15%.
+
 **An injury is about the weeks it lasts, not the whole horizon.** FPL's flags
 describe the next match. The ownership score now reads return dates from FPL's
 injury notes ("Expected back 18 Oct", "Suspended until 25 Oct"), and values a
