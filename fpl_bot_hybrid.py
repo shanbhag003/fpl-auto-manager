@@ -1838,6 +1838,22 @@ def fetch_public_squad(team_id, players_df, gameweek):
         print(f"No published picks for GW{last_gw}: {e}")
         return None, bank, value
 
+    # A Free Hit squad lasts one gameweek: FPL then restores the squad, and
+    # the bank, from before it. Reading the Free Hit week's picks planned GW9
+    # from a squad the manager no longer had. Step back past any Free Hit.
+    while picks.get('active_chip') == 'freehit' and last_gw > 1:
+        print(f"GW{last_gw} was a Free Hit; its squad has reverted. Reading GW{last_gw - 1}.")
+        last_gw -= 1
+        try:
+            picks = get(f'https://fantasy.premierleague.com/api/entry/{team_id}'
+                        f'/event/{last_gw}/picks/')
+        except Exception as e:
+            print(f"No published picks for GW{last_gw}: {e}")
+            return None, bank, value
+        history = picks.get('entry_history') or {}
+        bank = history.get('bank', bank)
+        value = history.get('value', value)
+
     ids = [p['element'] for p in picks.get('picks', [])]
     if not ids:
         return None, bank, value
